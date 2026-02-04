@@ -1,0 +1,15 @@
+{
+  "rows": 5000,
+  "issues_rows": 4998,
+  "issues_rate": 0.9996,
+  "missing_address": 1,
+  "missing_order_quantity": 1,
+  "ship_before_order": 75,
+  "sub_total_mismatch": 4930,
+  "discount_amount_mismatch": 4897,
+  "order_total_mismatch": 4931,
+  "total_mismatch": 4907,
+  "profit_margin_mismatch": 20,
+  "distinct_orders": 1435,
+  "avg_lines_per_order": 3.484320557491289
+}
