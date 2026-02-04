@@ -1,0 +1,1321 @@
+"""
+Arabic Analytics Copilot - /ask endpoint (stable + cache + optional Gemini)
+
+Drop this file into: backend/app/api/routes/ask.py
+
+Goals:
+- Never crash when Gemini quota is exceeded (fallback to cache or rule-based).
+- Works with BOTH catalog shapes:
+    A) {"metrics":[{"key":"net_sales",...}], "dimensions":[{"key":"city",...}]}
+    B) {"metrics":["net_sales",...], "dimensions":["city",...]}
+- Cache first (bi_meta.plan_cache), then (optional) LLM, then rule-based fallback.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import json
+import time
+import hashlib
+from typing import Any, Optional, List, Dict, Set
+from pathlib import Path
+
+import asyncpg
+from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException, Query
+
+# Phase 3: SQL guardrails (security)
+from backend.app.core.sql_guardrails import guard_sql_or_raise
+from pydantic import BaseModel, Field
+
+# Optional Gemini
+try:
+    from google import genai  # type: ignore
+except Exception:  # pragma: no cover
+    genai = None
+
+
+ASK_VERSION = "v4.7.1"
+# -----------------------------------------------------------------------------
+# ENV
+# -----------------------------------------------------------------------------
+# This file should live at: backend/app/api/routes/ask.py
+# parents[3] -> backend/
+ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
+load_dotenv(ENV_PATH)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+STATEMENT_TIMEOUT_MS = int(os.getenv("STATEMENT_TIMEOUT_MS", "8000"))
+DEFAULT_MAX_ROWS = int(os.getenv("DEFAULT_MAX_ROWS", "200"))
+DEDUPE_SYNONYMS = os.getenv("DEDUPE_SYNONYMS", "0") in ("1", "true", "True", "yes", "YES")
+PLAN_AUTOCORRECT = os.getenv("PLAN_AUTOCORRECT", "1") in ("1", "true", "True", "yes", "YES")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash")
+
+LLM_ENABLED = bool(GEMINI_API_KEY) and genai is not None
+
+gclient = None
+if LLM_ENABLED:
+    gclient = genai.Client(api_key=GEMINI_API_KEY)
+
+router = APIRouter(prefix="/ask", tags=["ask"])
+
+ALLOWED_OPS: Set[str] = {"=", "!=", ">", ">=", "<", "<=", "in", "between", "ilike"}
+
+
+class AskBody(BaseModel):
+    question: str = Field(..., min_length=1, max_length=4000)
+
+
+# -----------------------------------------------------------------------------
+# DB helpers
+# -----------------------------------------------------------------------------
+def _asyncpg_dsn(sqlalchemy_url: str) -> str:
+    # DATABASE_URL is usually: postgresql+asyncpg://...
+    return sqlalchemy_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _ensure_json_obj(x: Any) -> Any:
+    """asyncpg may return dict already for json/jsonb; if it returns a string, parse it."""
+    if isinstance(x, str):
+        try:
+            return json.loads(x)
+        except Exception:
+            return x
+    return x
+
+
+async def _db_fetchval(sql: str, *args) -> Any:
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set in backend/.env")
+    dsn = _asyncpg_dsn(DATABASE_URL)
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS};")
+        val = await conn.fetchval(sql, *args)
+        return _ensure_json_obj(val)
+    finally:
+        await conn.close()
+
+
+async def _db_fetchrow(sql: str, *args) -> Optional[dict]:
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set in backend/.env")
+    dsn = _asyncpg_dsn(DATABASE_URL)
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS};")
+        row = await conn.fetchrow(sql, *args)
+        return dict(row) if row else None
+    finally:
+        await conn.close()
+
+
+async def _db_fetch(sql: str, *args) -> list[dict]:
+    """Run a SELECT and return rows as list of dicts."""
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set in backend/.env")
+    dsn = _asyncpg_dsn(DATABASE_URL)
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS};")
+        recs = await conn.fetch(sql, *args)
+        return [dict(r) for r in recs]
+    finally:
+        await conn.close()
+
+
+# -----------------------------------------------------------------------------
+# Catalog
+# -----------------------------------------------------------------------------
+def _catalog_keys(catalog: dict, key: str) -> Set[str]:
+    """
+    Support both:
+      - catalog["metrics"] as list[str]
+      - catalog["metrics"] as list[{"key": "...", ...}]
+    """
+    items = catalog.get(key) or []
+    out: Set[str] = set()
+
+    if isinstance(items, list):
+        for it in items:
+            if isinstance(it, str):
+                out.add(it)
+            elif isinstance(it, dict):
+                # prefer "key", fallback to "name"
+                k = it.get("key") or it.get("name")
+                if isinstance(k, str) and k:
+                    out.add(k)
+    return out
+
+
+
+
+def _augment_catalog(catalog: dict) -> dict:
+    """Augment catalog with known safe keys that exist in bi.vw_fact_sales_line_clean.
+
+    Enables quarter/year grouping and discounts metric even if the DB catalog is missing them.
+    """
+    if not isinstance(catalog, dict):
+        return catalog
+
+    def _ensure_key(group: str, key: str, default_obj: dict | None = None) -> None:
+        arr = catalog.get(group)
+        if arr is None:
+            catalog[group] = [key]
+            return
+        if not isinstance(arr, list):
+            return
+        if arr and isinstance(arr[0], dict):
+            keys = {(x.get("key") or x.get("name") or "").strip() for x in arr if isinstance(x, dict)}
+            if key not in keys:
+                catalog[group].append(default_obj or {"key": key, "label": key})
+        else:
+            keys = {str(x).strip() for x in arr}
+            if key not in keys:
+                catalog[group].append(key)
+
+    # Dimensions
+    for dim_key in ["order_year", "order_quarter"]:
+        _ensure_key("dimensions", dim_key, {"key": dim_key, "label": dim_key})
+
+    # Metrics
+    _ensure_key("metrics", "discount_amount", {"key": "discount_amount", "label": "discount_amount"})
+
+    return catalog
+async def _get_catalog() -> dict:
+    """
+    Try:
+      1) SELECT bi_meta.get_catalog();
+      2) SELECT bi_meta.get_catalog($1)::jsonb;   (if you later add a schema arg)
+    """
+    try:
+        catalog = await _db_fetchval("SELECT bi_meta.get_catalog();")
+    except Exception:
+        # fallback signature with one argument (optional)
+        catalog = await _db_fetchval("SELECT bi_meta.get_catalog($1)::jsonb;", "bi")
+
+    if not catalog:
+        raise HTTPException(status_code=500, detail="Catalog is empty. Did you create bi_meta.get_catalog()?")
+    if not isinstance(catalog, dict):
+        raise HTTPException(status_code=500, detail="Catalog returned non-JSON object.")
+    catalog = _augment_catalog(catalog)
+
+    return catalog
+
+
+# -----------------------------------------------------------------------------
+# Plan parsing + validation
+# -----------------------------------------------------------------------------
+def _extract_json(text: str) -> Dict[str, Any]:
+    """Gemini may wrap JSON in text/code fences; grab the first JSON object."""
+    if not text:
+        raise ValueError("Empty LLM response")
+
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*```$", "", t)
+
+    # direct parse
+    try:
+        obj = json.loads(t)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    # regex slice
+    m = re.search(r"\{.*\}", t, flags=re.DOTALL)
+    if not m:
+        raise ValueError("No JSON object found in LLM output")
+    obj = json.loads(m.group(0))
+    if not isinstance(obj, dict):
+        raise ValueError("JSON is not an object")
+    return obj
+# -----------------------------------------------------------------------------
+# Lightweight "RAG" catalog scoping for LLM (quality + lower token use)
+# -----------------------------------------------------------------------------
+SCOPE_TOPK_METRICS = int(os.getenv("SCOPE_TOPK_METRICS", "12"))
+SCOPE_TOPK_DIMS = int(os.getenv("SCOPE_TOPK_DIMS", "12"))
+
+
+def _item_key(it: Any) -> str:
+    if isinstance(it, dict):
+        return str(it.get("key") or it.get("name") or it.get("metric_key") or it.get("dim_key") or "").strip()
+    return str(it).strip()
+
+
+def _slim_item(it: Any) -> Any:
+    """Keep only light fields to reduce prompt tokens."""
+    if isinstance(it, dict):
+        k = _item_key(it)
+        if not k:
+            return it
+        label = it.get("label") or it.get("display_name_ar") or it.get("display_name_en") or k
+        return {"key": k, "label": str(label)}
+    return _item_key(it)
+
+
+def _score_key(question: str, key: str) -> int:
+    q_raw = (question or "").strip()
+    q = q_raw.lower()
+
+    # Arabic keeps case; use raw contains for Arabic, lower for English.
+    kw_map: Dict[str, List[str]] = {
+        # metrics
+        "net_sales": ["صافي", "صافية", "net"],
+        "gross_sales": ["إجمالي", "اجمالي", "gross", "sales", "مبيعات"],
+        "discount_amount": ["خصم", "خصومات", "discount"],
+        "discounts": ["خصم", "خصومات", "discount"],
+        "gross_profit": ["ربح", "gross profit"],
+        "profit_after_shipping": ["بعد الشحن", "profit after shipping"],
+        "shipping_cost": ["شحن", "shipping"],
+        "ship_delay_days": ["تأخير", "delay"],
+        "order_quantity": ["كمية", "وحدات", "quantity", "units"],
+        "units": ["كمية", "وحدات", "quantity", "units"],
+
+        # dimensions
+        "city": ["مدينة", "مدن", "city"],
+        "state": ["ولاية", "state"],
+        "order_year": ["سنة", "سنوي", "year"],
+        "order_quarter": ["ربع", "quarter", "qtr"],
+        "month_start": ["شهر", "شهري", "شهريا", "monthly", "month"],
+        "order_month": ["شهر", "شهري", "monthly", "month"],
+        "product_category": ["فئة", "تصنيف", "category"],
+        "product_name": ["منتج", "منتجات", "product"],
+        "customer_type": ["عميل", "زبون", "customer"],
+        "account_manager": ["مدير", "account manager", "manager"],
+        "ship_mode": ["طريقة الشحن", "ship mode", "shipping mode"],
+    }
+
+    score = 0
+    for kw in kw_map.get(key, []):
+        if kw.lower() in q or kw in q_raw:
+            score += 3
+
+    # Generic boosts
+    if ("قارن" in q_raw or "compare" in q) and key in ("net_sales", "discount_amount", "discounts"):
+        score += 2
+
+    if any(x in q_raw for x in ["اعلى", "أعلى", "top", "الأعلى"]) and key in ("city", "product_name", "product_category", "state"):
+        score += 1
+
+    if any(x in q_raw for x in ["ربع", "ربع سنوي"]) and key in ("order_year", "order_quarter"):
+        score += 2
+
+    if any(x in q_raw for x in ["شهري", "شهريا", "بالشهر", "شهريًا"]) and key in ("month_start", "order_year"):
+        score += 2
+
+    return score
+
+
+def _scope_catalog_for_llm(question: str, catalog: dict) -> dict:
+    """Return a filtered/slim catalog for LLM prompt to improve quality."""
+    if not isinstance(catalog, dict):
+        return catalog
+
+    metrics = catalog.get("metrics") or []
+    dims = catalog.get("dimensions") or []
+
+    m_scored = []
+    for it in metrics if isinstance(metrics, list) else []:
+        k = _item_key(it)
+        if not k:
+            continue
+        m_scored.append((_score_key(question, k), k, it))
+
+    d_scored = []
+    for it in dims if isinstance(dims, list) else []:
+        k = _item_key(it)
+        if not k:
+            continue
+        d_scored.append((_score_key(question, k), k, it))
+
+    # keep top-scoring items; if score==0 keep none initially
+    m_scored.sort(key=lambda x: (-x[0], x[1]))
+    d_scored.sort(key=lambda x: (-x[0], x[1]))
+
+    m_keep = [it for sc, k, it in m_scored if sc > 0][:SCOPE_TOPK_METRICS]
+    d_keep = [it for sc, k, it in d_scored if sc > 0][:SCOPE_TOPK_DIMS]
+
+    # sensible defaults if too empty
+    m_keys = {_item_key(x) for x in m_keep}
+    d_keys = {_item_key(x) for x in d_keep}
+
+    def _add_default(group_list: list, group_all: list, wanted_keys: List[str]) -> None:
+        existing = {_item_key(x) for x in group_list}
+        for wk in wanted_keys:
+            if wk in existing:
+                continue
+            for it in group_all:
+                if _item_key(it) == wk:
+                    group_list.append(it)
+                    existing.add(wk)
+                    break
+
+    # defaults for common analytics
+    _add_default(m_keep, metrics if isinstance(metrics, list) else [], ["net_sales", "gross_sales", "discount_amount", "discounts"])
+    _add_default(d_keep, dims if isinstance(dims, list) else [], ["city", "order_year", "order_quarter", "month_start"])
+
+    # slim down to reduce prompt tokens
+    return {
+        "allowed_schema": catalog.get("allowed_schema") or "bi",
+        "metrics": [_slim_item(x) for x in m_keep],
+        "dimensions": [_slim_item(x) for x in d_keep],
+    }
+
+
+
+
+
+def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    plan = dict(plan or {})
+    plan.setdefault("metrics", [])
+    plan.setdefault("dimensions", [])
+    plan.setdefault("filters", [])
+    plan.setdefault("sort", [])
+    plan.setdefault("limit", DEFAULT_MAX_ROWS)
+    plan.setdefault("notes", "")
+
+    # ensure list types
+    for k in ("metrics", "dimensions", "filters", "sort"):
+        v = plan.get(k)
+        if v is None:
+            plan[k] = []
+        elif not isinstance(v, list):
+            plan[k] = [v]
+
+    # normalize filters
+    norm_filters = []
+    for f in plan.get("filters") or []:
+        if not isinstance(f, dict):
+            continue
+        f = dict(f)
+        if "op" not in f and "operator" in f:
+            f["op"] = f.pop("operator")
+        if f.get("op") in ("==", "==="):
+            f["op"] = "="
+        if isinstance(f.get("op"), str):
+            f["op"] = f["op"].lower()
+        norm_filters.append(f)
+    plan["filters"] = norm_filters
+
+    # normalize sort
+    norm_sort = []
+    for s in plan.get("sort") or []:
+        if not isinstance(s, dict):
+            continue
+        s = dict(s)
+        if "dir" not in s and "direction" in s:
+            s["dir"] = s.pop("direction")
+        d = (s.get("dir") or "desc").lower()
+        s["dir"] = "asc" if d == "asc" else "desc"
+        norm_sort.append(s)
+    plan["sort"] = norm_sort
+
+    # normalize limit
+    try:
+        plan["limit"] = int(plan.get("limit") or DEFAULT_MAX_ROWS)
+    except Exception:
+        plan["limit"] = DEFAULT_MAX_ROWS
+    plan["limit"] = max(1, min(5000, plan["limit"]))
+
+    return plan
+
+
+
+def _dedupe_synonyms(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Optional cleanup to avoid duplicate synonymous keys (LLM sometimes outputs both)."""
+    plan = dict(plan or {})
+    metrics = plan.get("metrics") or []
+    dims = plan.get("dimensions") or []
+
+    # preserve order, unique
+    def _uniq(seq):
+        out = []
+        seen = set()
+        for x in seq:
+            if not isinstance(x, str):
+                continue
+            if x not in seen:
+                out.append(x)
+                seen.add(x)
+        return out
+
+    metrics = _uniq(metrics)
+    dims = _uniq(dims)
+
+    # Canonical preferences
+    if "discount_amount" in metrics and "discounts" in metrics:
+        metrics = [m for m in metrics if m != "discounts"]
+    if "order_quarter" in dims and "quarter" in dims:
+        dims = [d for d in dims if d != "quarter"]
+    if "order_year" in dims and "year" in dims:
+        dims = [d for d in dims if d != "year"]
+
+    plan["metrics"] = metrics
+    plan["dimensions"] = dims
+    return plan
+
+
+
+def _autocorrect_plan(question: str, plan: Dict[str, Any], catalog: dict) -> Dict[str, Any]:
+    """
+    Autocorrect LLM plans (and even rule-based) to reduce 400/500 errors:
+    - Map common synonyms to canonical keys that exist in the catalog.
+    - Drop unknown metrics/dimensions/filters/sort fields (best-effort).
+    - Remove duplicates and enforce sane limit.
+    This runs BEFORE _validate_plan().
+    """
+    plan = dict(plan or {})
+    q_raw = (question or "").strip()
+    q = q_raw.lower()
+
+    metrics_ok = _catalog_keys(catalog, "metrics")
+    dims_ok = _catalog_keys(catalog, "dimensions")
+
+    # Canonical mapping (only applied if target exists in catalog)
+    dim_map = {
+        "year": "order_year",
+        "order_yr": "order_year",
+        "yr": "order_year",
+        "quarter": "order_quarter",
+        "qtr": "order_quarter",
+        "q": "order_quarter",
+        "month": "month_start",
+        "monthly": "month_start",
+    }
+    met_map = {
+        "discounts": "discount_amount",
+        "discount": "discount_amount",
+        "gross": "gross_sales",
+        "sales": "gross_sales",
+        "qty": "order_quantity",
+        "quantity": "order_quantity",
+        "units": "order_quantity",
+    }
+
+    def _canon_dim(d: str) -> str:
+        d0 = (d or "").strip()
+        d1 = d0.lower()
+        cand = dim_map.get(d1)
+        if cand and cand in dims_ok:
+            return cand
+        # If already valid
+        if d0 in dims_ok:
+            return d0
+        # Some LLMs output "orderQuarter"/"order_quarter" variations
+        d2 = re.sub(r"[^a-z0-9_]+", "_", d1).strip("_")
+        cand2 = dim_map.get(d2)
+        if cand2 and cand2 in dims_ok:
+            return cand2
+        if d2 in dims_ok:
+            return d2
+        return d0  # may be dropped later
+
+    def _canon_met(m: str) -> str:
+        m0 = (m or "").strip()
+        m1 = m0.lower()
+        cand = met_map.get(m1)
+        if cand and cand in metrics_ok:
+            return cand
+        if m0 in metrics_ok:
+            return m0
+        m2 = re.sub(r"[^a-z0-9_]+", "_", m1).strip("_")
+        cand2 = met_map.get(m2)
+        if cand2 and cand2 in metrics_ok:
+            return cand2
+        if m2 in metrics_ok:
+            return m2
+        return m0  # may be dropped later
+
+    # Normalize lists + map synonyms
+    metrics = []
+    for m in (plan.get("metrics") or []):
+        if isinstance(m, str) and m.strip():
+            metrics.append(_canon_met(m))
+
+    dims = []
+    for d in (plan.get("dimensions") or []):
+        if isinstance(d, str) and d.strip():
+            dims.append(_canon_dim(d))
+
+    # Remove duplicates while preserving order
+    def _uniq(seq):
+        out = []
+        seen = set()
+        for x in seq:
+            if x and x not in seen:
+                out.append(x)
+                seen.add(x)
+        return out
+
+    metrics = _uniq(metrics)
+    dims = _uniq(dims)
+
+    # Heuristic nudges (only if keys exist)
+    if ("ربع" in q_raw or "quarter" in q) and "order_quarter" in dims_ok and "order_quarter" not in dims:
+        dims.append("order_quarter")
+    if ("سنة" in q_raw or "year" in q) and "order_year" in dims_ok and "order_year" not in dims:
+        dims.append("order_year")
+
+    # Prefer discount_amount over discounts if both exist
+    if "discount_amount" in metrics_ok and "discount_amount" in metrics and "discounts" in metrics:
+        metrics = [x for x in metrics if x != "discounts"]
+
+    # Drop unknown keys (best effort)
+    metrics = [m for m in metrics if m in metrics_ok]
+    dims = [d for d in dims if d in dims_ok]
+
+    plan["metrics"] = metrics
+    plan["dimensions"] = dims
+
+    # Filters: map field + drop unknown
+    norm_filters = []
+    for f in (plan.get("filters") or []):
+        if not isinstance(f, dict):
+            continue
+        f2 = dict(f)
+        field = str(f2.get("field") or "").strip()
+        op = str(f2.get("op") or "").strip().lower()
+        if not field or op not in ALLOWED_OPS:
+            continue
+
+        field_c = _canon_dim(field) if field not in metrics_ok else _canon_met(field)
+        # Filters are usually dims; allow filtering by metric only if present in metrics_ok
+        if field_c in dims_ok or field_c in metrics_ok:
+            f2["field"] = field_c
+        else:
+            continue
+
+        # Basic value sanity for between
+        if op == "between":
+            v = f2.get("value")
+            if not isinstance(v, list) or len(v) != 2:
+                continue
+        norm_filters.append(f2)
+    plan["filters"] = norm_filters
+
+    # Sort: map field + drop unknown; if empty and metrics exist, default to first metric desc
+    norm_sort = []
+    for s in (plan.get("sort") or []):
+        if not isinstance(s, dict):
+            continue
+        s2 = dict(s)
+        field = str(s2.get("field") or "").strip()
+        if not field:
+            continue
+        field_c = _canon_met(field)
+        if field_c not in metrics_ok and field_c not in dims_ok:
+            field_c = _canon_dim(field)
+        if field_c not in metrics_ok and field_c not in dims_ok:
+            continue
+        s2["field"] = field_c
+        d = (s2.get("dir") or "desc").lower()
+        s2["dir"] = "asc" if d == "asc" else "desc"
+        norm_sort.append(s2)
+
+    if not norm_sort and metrics:
+        norm_sort = [{"field": metrics[0], "dir": "desc"}]
+    plan["sort"] = norm_sort
+
+    # Limit sanity
+    try:
+        plan["limit"] = int(plan.get("limit") or DEFAULT_MAX_ROWS)
+    except Exception:
+        plan["limit"] = DEFAULT_MAX_ROWS
+    plan["limit"] = max(1, min(5000, plan["limit"]))
+
+    return plan
+
+def _validate_plan(plan: Dict[str, Any], catalog: dict) -> Dict[str, Any]:
+    metrics_ok = _catalog_keys(catalog, "metrics")
+    dims_ok = _catalog_keys(catalog, "dimensions")
+
+    if not plan.get("metrics") and not plan.get("dimensions"):
+        raise HTTPException(status_code=400, detail="Plan must include at least one metric or dimension.")
+
+    for m in plan.get("metrics") or []:
+        if m not in metrics_ok:
+            raise HTTPException(status_code=400, detail=f"Unknown metric key: {m}")
+
+    for d in plan.get("dimensions") or []:
+        if d not in dims_ok:
+            raise HTTPException(status_code=400, detail=f"Unknown dimension key: {d}")
+
+    for f in plan.get("filters") or []:
+        if not isinstance(f, dict):
+            raise HTTPException(status_code=400, detail="Each filter must be an object")
+        field = f.get("field")
+        op = (f.get("op") or "").lower()
+        if field not in dims_ok:
+            raise HTTPException(status_code=400, detail=f"Unknown filter field: {field}")
+        if op not in ALLOWED_OPS:
+            raise HTTPException(status_code=400, detail=f"Unsupported operator: {op}")
+
+    if plan.get("sort"):
+        s = plan["sort"][0]
+        field = s.get("field")
+        if field and (field not in metrics_ok) and (field not in dims_ok):
+            raise HTTPException(status_code=400, detail=f"Unknown sort field: {field}")
+
+    return plan
+
+
+# -----------------------------------------------------------------------------
+# Heuristics + rule-based fallback
+# -----------------------------------------------------------------------------
+# --- Top-N parsing helpers (v3) ------------------------------------------------
+_ARABIC_DIGIT_MAP = str.maketrans({
+    "٠":"0","١":"1","٢":"2","٣":"3","٤":"4","٥":"5","٦":"6","٧":"7","٨":"8","٩":"9",
+    "۰":"0","۱":"1","۲":"2","۳":"3","۴":"4","۵":"5","۶":"6","۷":"7","۸":"8","۹":"9",
+})
+
+_ARABIC_NUMBER_WORDS = {
+    "واحد": 1, "واحدة": 1,
+    "اثنين": 2, "اثنان": 2, "اثنتين": 2, "اثنتان": 2,
+    "ثلاث": 3, "ثلاثة": 3,
+    "أربع": 4, "اربعة": 4, "أربعة": 4,
+    "خمس": 5, "خمسة": 5,
+    "ست": 6, "ستة": 6,
+    "سبع": 7, "سبعة": 7,
+    "ثمان": 8, "ثمانية": 8,
+    "تسع": 9, "تسعة": 9,
+    "عشر": 10, "عشرة": 10,
+    "عشرين": 20, "ثلاثين": 30, "أربعين": 40, "خمسين": 50,
+    "مئة": 100, "مائة": 100,
+}
+
+_TOP_HINTS = ("top", "highest", "best", "أعلى", "اعلى", "الأعلى", "الاعلى", "أفضل", "الافضل", "الأفضل")
+_RANKING_OBJECTS = (
+    "مدن", "المدن", "مدينة", "cities", "city",
+    "عملاء", "العملاء", "customers", "customer",
+    "منتجات", "المنتجات", "products", "product",
+    "اصناف", "الأصناف", "items", "item",
+)
+
+def _infer_top_limit(question: str) -> Optional[int]:
+    """Infer intended Top-N from text. Returns None if not a ranking query."""
+    q = (question or "").strip()
+    if not q:
+        return None
+
+    q_norm = q.translate(_ARABIC_DIGIT_MAP)
+    ql = q_norm.lower()
+
+    # explicit digits anywhere near top hints
+    if any(h in q for h in _TOP_HINTS) or any(h in ql for h in ("top", "highest", "best")):
+        m = re.search(r"\b(?:top\s*)?(\d{1,4})\b", ql)
+        if m:
+            try:
+                n = int(m.group(1))
+                return n
+            except Exception:
+                pass
+
+        # Arabic word numbers after hints: "أعلى عشرة"
+        for w, n in _ARABIC_NUMBER_WORDS.items():
+            if w in q:
+                return n
+
+        # default to 10 ONLY if it looks like a ranking over entities (cities/products/etc.)
+        if any(obj in q for obj in _RANKING_OBJECTS) or any(obj in ql for obj in _RANKING_OBJECTS):
+            return 10
+
+    return None
+
+def _apply_heuristics(question: str, plan: Dict[str, Any], catalog: Optional[dict] = None) -> Dict[str, Any]:
+    """Post-process a plan (from LLM or rule-based) using lightweight heuristics.
+
+    Key goals:
+    - Add time grouping for month/quarter when mentioned.
+    - Add discount metrics when the question asks for discounts.
+    - Infer Top-N when the question is a ranking query.
+    - Keep it SAFE: only add keys that exist in the catalog.
+    """
+    # Backward compatible: older callers may not pass catalog (e.g., /eval/smoke)
+    catalog = catalog or {}
+
+    q_raw = (question or "").strip()
+    q = q_raw.lower()
+
+    plan = dict(plan or {})
+    plan.setdefault("metrics", [])
+    plan.setdefault("dimensions", [])
+    plan.setdefault("filters", [])
+    plan.setdefault("sort", [])
+    plan.setdefault("limit", DEFAULT_MAX_ROWS)
+
+    metrics_ok = _catalog_keys(catalog, "metrics")
+    dims_ok = _catalog_keys(catalog, "dimensions")
+
+    def add_dim(d: str) -> None:
+        if d in dims_ok and d not in (plan.get("dimensions") or []):
+            plan["dimensions"] = list(dict.fromkeys((plan.get("dimensions") or []) + [d]))
+
+    def add_metric(m: str) -> None:
+        if m in metrics_ok and m not in (plan.get("metrics") or []):
+            plan["metrics"] = list(dict.fromkeys((plan.get("metrics") or []) + [m]))
+
+    # -----------------------
+    # Time grouping heuristics
+    # -----------------------
+    if any(x in q_raw for x in ["شهري", "شهريا", "بالشهر", "شهريًا"]) or "monthly" in q:
+        add_dim("month_start")
+        # keep monthly output bounded
+        plan["limit"] = min(int(plan.get("limit") or DEFAULT_MAX_ROWS), 60)
+
+    quarter_hit = (
+        any(x in q_raw for x in ["ربع", "بالربع", "ربع سنوي", "ربع سنوية", "ربعياً", "ربعيا"])
+        or any(x in q for x in ["quarter", "qtr", "quarterly"])
+    )
+    if quarter_hit:
+        # Prefer explicit quarter/year columns if available
+        add_dim("order_year")
+        add_dim("order_quarter")
+
+    # -----------------------
+    # Metric intent heuristics
+    # -----------------------
+    net_hit = any(x in q_raw for x in ["صافي", "صافية"]) or "net" in q
+    gross_hit = "إجمالي" in q_raw and not net_hit
+    disc_hit = any(x in q_raw for x in ["خصم", "خصومات"]) or any(x in q for x in ["discount", "discounts"])
+
+    # Choose the best discount metric key present in the catalog
+    discount_metric = None
+    for cand in ["discount_amount", "discounts", "discount"]:
+        if cand in metrics_ok:
+            discount_metric = cand
+            break
+
+    # If it is a "compare" style query, include multiple metrics when possible.
+    if net_hit:
+        add_metric("net_sales")
+        # Default sort by net_sales
+        plan["sort"] = [{"field": "net_sales", "dir": "desc"}] if "net_sales" in metrics_ok else (plan.get("sort") or [])
+    if gross_hit:
+        add_metric("gross_sales")
+        if not plan.get("sort"):
+            plan["sort"] = [{"field": "gross_sales", "dir": "desc"}] if "gross_sales" in metrics_ok else []
+    if disc_hit and discount_metric:
+        add_metric(discount_metric)
+
+    # If question explicitly says "compare" and we have both, keep both metrics in the response.
+    compare_hit = ("قارن" in q_raw) or ("compare" in q)
+    if compare_hit:
+        # Ensure a stable ordering: net_sales first, then discounts if requested, then others.
+        ordered = []
+        for k in ["net_sales", discount_metric, "gross_sales", "gross_profit"]:
+            if k and k in (plan.get("metrics") or []) and k not in ordered:
+                ordered.append(k)
+        # add any remaining metrics (if LLM added more)
+        for k in plan.get("metrics") or []:
+            if k not in ordered:
+                ordered.append(k)
+        plan["metrics"] = ordered or (plan.get("metrics") or [])
+
+    # -----------------------
+    # City mapping heuristics
+    # -----------------------
+    city_map = {
+        "سيدني": "Sydney",
+        "سيدنى": "Sydney",
+        "sydney": "Sydney",
+        "ملبورن": "Melbourne",
+        "ميلبورن": "Melbourne",
+        "melbourne": "Melbourne",
+    }
+    city_val = None
+    for k, v in city_map.items():
+        if k in q:
+            city_val = v
+            break
+    if city_val:
+        filters = plan.get("filters") or []
+        if not any(isinstance(f, dict) and f.get("field") == "city" for f in filters):
+            filters.append({"field": "city", "op": "=", "value": city_val})
+        plan["filters"] = filters
+        add_dim("city")
+
+    # -----------------------
+    # Top-N inference (v3)
+    # -----------------------
+    top_n = _infer_top_limit(question or "")
+    if top_n is not None:
+        plan["limit"] = min(5000, max(1, int(top_n)))
+
+    return plan
+
+
+def _rule_based_plan(question: str, catalog: dict) -> Dict[str, Any]:
+    """Very simple fallback that works offline."""
+    q = (question or "").strip()
+    ql = q.lower()
+
+    dims_ok = _catalog_keys(catalog, "dimensions")
+    metrics_ok = _catalog_keys(catalog, "metrics")
+
+    plan: Dict[str, Any] = {
+        "metrics": [],
+        "dimensions": [],
+        "filters": [],
+        "sort": [],
+        "limit": DEFAULT_MAX_ROWS,
+        "notes": "rule_based",
+    }
+
+    # pick metric
+    if ("صافي" in q or "صافية" in q or "net" in ql) and "net_sales" in metrics_ok:
+        plan["metrics"] = ["net_sales"]
+        plan["sort"] = [{"field": "net_sales", "dir": "desc"}]
+    elif "إجمالي" in q and "gross_sales" in metrics_ok:
+        plan["metrics"] = ["gross_sales"]
+        plan["sort"] = [{"field": "gross_sales", "dir": "desc"}]
+    elif "gross_profit" in metrics_ok and "ربح" in q:
+        plan["metrics"] = ["gross_profit"]
+        plan["sort"] = [{"field": "gross_profit", "dir": "desc"}]
+    else:
+        # safe default
+        default_metric = "net_sales" if "net_sales" in metrics_ok else (next(iter(metrics_ok), None))
+        if default_metric:
+            plan["metrics"] = [default_metric]
+            plan["sort"] = [{"field": default_metric, "dir": "desc"}]
+    # discounts / compare (Phase 3 v4)
+    disc_hit = any(x in q for x in ["خصم", "خصومات"]) or any(x in ql for x in ["discount", "discounts"])
+    discount_metric = None
+    for cand in ["discount_amount", "discounts", "discount"]:
+        if cand in metrics_ok:
+            discount_metric = cand
+            break
+
+    compare_hit = ("قارن" in q) or ("compare" in ql)
+
+    if disc_hit and discount_metric:
+        if compare_hit and "net_sales" in (plan.get("metrics") or []):
+            plan["metrics"] = list(dict.fromkeys((plan.get("metrics") or []) + [discount_metric]))
+            # keep sorting by net_sales
+            plan["sort"] = [{"field": "net_sales", "dir": "desc"}] if "net_sales" in metrics_ok else (plan.get("sort") or [])
+        else:
+            plan["metrics"] = [discount_metric]
+            plan["sort"] = [{"field": discount_metric, "dir": "desc"}]
+
+
+    # monthly
+    if any(x in q for x in ["شهري", "شهريا", "بالشهر", "شهريًا"]) and "month_start" in dims_ok:
+        plan["dimensions"].append("month_start")
+
+    # quarterly
+    if any(x in q for x in ["ربع", "بالربع", "ربع سنوي", "ربع سنوية", "ربعياً", "ربعيا"]) or any(x in ql for x in ["quarter", "qtr", "quarterly"]):
+        if "order_year" in dims_ok:
+            plan["dimensions"].append("order_year")
+        if "order_quarter" in dims_ok:
+            plan["dimensions"].append("order_quarter")
+
+
+    # basic "by" logic (city / cities / مدن)
+    if (
+        any(x in q for x in ["مدينة", "مدن", "المدن"])
+        or any(x in ql for x in ["city", "cities"])
+    ) and "city" in dims_ok:
+        plan["dimensions"].append("city")
+
+    # city mapping
+    city_map = {
+        "سيدني": "Sydney",
+        "sydney": "Sydney",
+        "ملبورن": "Melbourne",
+        "melbourne": "Melbourne",
+    }
+    if "city" in dims_ok:
+        for k, v in city_map.items():
+            if k in ql:
+                plan["filters"].append({"field": "city", "op": "=", "value": v})
+                if "city" not in plan["dimensions"]:
+                    plan["dimensions"].append("city")
+                break
+
+    # Top-N
+    top_n = _infer_top_limit(question)
+    if top_n is not None:
+        plan["limit"] = min(5000, max(1, int(top_n)))
+
+    # dedupe dimensions
+    plan["dimensions"] = list(dict.fromkeys(plan["dimensions"]))
+    return plan
+
+
+# -----------------------------------------------------------------------------
+# Cache (bi_meta.plan_cache)
+# -----------------------------------------------------------------------------
+def _normalize_question(q: str) -> str:
+    q = (q or "").strip().lower()
+    q = re.sub(r"\s+", " ", q)
+    return q
+
+
+def _catalog_hash(catalog: dict) -> str:
+    payload = json.dumps(catalog, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+async def _cache_get_plan(question_norm: str, catalog_hash: str) -> Optional[dict]:
+    try:
+        row = await _db_fetchrow(
+            """
+            SELECT id, plan
+            FROM bi_meta.plan_cache
+            WHERE question_norm=$1 AND catalog_hash=$2
+            ORDER BY updated_at DESC
+            LIMIT 1;
+            """,
+            question_norm,
+            catalog_hash,
+        )
+        if not row:
+            return None
+        row["plan"] = _ensure_json_obj(row.get("plan"))
+        return row
+    except Exception:
+        # cache table may not exist yet
+        return None
+
+
+async def _cache_touch(cache_id: int) -> None:
+    try:
+        await _db_fetchval(
+            """
+            UPDATE bi_meta.plan_cache
+            SET hits = hits + 1,
+                last_used_at = now(),
+                updated_at = now()
+            WHERE id = $1
+            RETURNING id;
+            """,
+            cache_id,
+        )
+    except Exception:
+        pass
+
+
+async def _cache_upsert_plan(question_norm: str, question_raw: str, catalog_hash: str, plan: dict, model: str) -> None:
+    try:
+        await _db_fetchval(
+            """
+            INSERT INTO bi_meta.plan_cache(question_norm, question_raw, catalog_hash, plan, model, hits, last_used_at)
+            VALUES ($1, $2, $3, $4::jsonb, $5, 0, now())
+            ON CONFLICT (question_norm, catalog_hash)
+            DO UPDATE SET
+              question_raw = EXCLUDED.question_raw,
+              plan        = EXCLUDED.plan,
+              model       = EXCLUDED.model,
+              updated_at  = now(),
+              last_used_at = now();
+            """,
+            question_norm,
+            question_raw,
+            catalog_hash,
+            json.dumps(plan, ensure_ascii=False),
+            model,
+        )
+    except Exception:
+        pass
+
+
+# -----------------------------------------------------------------------------
+# Explanation fallback (no LLM)
+# -----------------------------------------------------------------------------
+def _explain_from_rows(question: str, plan: dict, rows: List[dict]) -> dict:
+    metric = (plan.get("metrics") or ["value"])[0]
+    metric_label_ar = {"net_sales": "صافي المبيعات", "gross_sales": "إجمالي المبيعات", "gross_profit": "إجمالي الربح", "discounts": "الخصومات", "discount_amount": "الخصومات"}.get(metric, metric)
+    metric_label_en = {"net_sales": "net sales", "gross_sales": "gross sales", "gross_profit": "gross profit", "discounts": "discounts", "discount_amount": "discounts"}.get(metric, metric)
+
+    if not rows:
+        return {
+            "summary_ar": f"لا توجد نتائج مطابقة لهذا السؤال ({metric_label_ar}).",
+            "summary_en": f"No results matched this query ({metric_label_en}).",
+            "insights_ar": [],
+            "insights_en": [],
+            "followups_ar": ["جرّب تغيير الفلاتر أو توسيع الفترة الزمنية."],
+            "followups_en": ["Try adjusting filters or expanding the time range."],
+        }
+
+    def _num(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    vals = [(_num(r.get(metric)), r) for r in rows]
+    vals = [(v, r) for (v, r) in vals if v is not None]
+    max_row = max(vals, key=lambda x: x[0])[1] if vals else rows[0]
+    min_row = min(vals, key=lambda x: x[0])[1] if vals else rows[-1]
+
+    def fmt(v):
+        try:
+            return f"{float(v):,.2f}"
+        except Exception:
+            return str(v)
+
+    month_key = "month_start" if rows and isinstance(rows[0], dict) and "month_start" in rows[0] else None
+    city = None
+    for f in plan.get("filters") or []:
+        if isinstance(f, dict) and f.get("field") == "city" and f.get("op") == "=":
+            city = f.get("value")
+
+    city_ar = "سيدني" if city == "Sydney" else ("ملبورن" if city == "Melbourne" else (city or ""))
+    city_en = city or ""
+
+    summary_ar = f"يعرض التقرير {metric_label_ar} " + (f"في {city_ar} " if city_ar else "") + f"لعدد {len(rows)} صف/فترة."
+    summary_en = f"The report shows {metric_label_en} " + (f"for {city_en} " if city_en else "") + f"across {len(rows)} rows/periods."
+
+    insights_ar = [
+        f"أعلى قيمة كانت {fmt(max_row.get(metric))}" + (f" في {max_row.get(month_key)}." if month_key else "."),
+        f"أقل قيمة كانت {fmt(min_row.get(metric))}" + (f" في {min_row.get(month_key)}." if month_key else "."),
+    ]
+    insights_en = [
+        f"Highest value was {fmt(max_row.get(metric))}" + (f" on {max_row.get(month_key)}." if month_key else "."),
+        f"Lowest value was {fmt(min_row.get(metric))}" + (f" on {min_row.get(month_key)}." if month_key else "."),
+    ]
+
+    return {
+        "summary_ar": summary_ar,
+        "summary_en": summary_en,
+        "insights_ar": insights_ar[:3],
+        "insights_en": insights_en[:3],
+        "followups_ar": ["هل تريد نفس التحليل لكن حسب فئة المنتج؟", "هل تريد مقارنة سيدني وملبورن في نفس الفترة؟", "هل تريد ترتيب أفضل 10 منتجات حسب صافي المبيعات؟"],
+        "followups_en": ["Do you want the same analysis broken down by product category?", "Do you want to compare Sydney vs Melbourne for the same period?", "Do you want the top 10 products by net sales?"],
+    }
+
+
+# -----------------------------------------------------------------------------
+# /ask endpoint
+# -----------------------------------------------------------------------------
+@router.post("")
+async def ask(
+    body: AskBody,
+    explain: bool = Query(False, description="If true, return bilingual explanation + followups"),
+    use_llm: bool = Query(False, description="If true, attempt Gemini (uses quota)."),
+    use_cache: bool = Query(True, description="If true, use cached plan when available."),
+):
+    catalog = await _get_catalog()
+    c_hash = _catalog_hash(catalog)
+    q_norm = _normalize_question(body.question)
+
+    plan: Optional[dict] = None
+    used_cache = False
+    used_llm = False
+    warnings_outer: List[str] = []
+
+    # 1) cache first
+    if use_cache:
+        cached = await _cache_get_plan(q_norm, c_hash)
+        if cached and cached.get("plan"):
+            plan = cached["plan"]
+            used_cache = True
+            if cached.get("id") is not None:
+                await _cache_touch(int(cached["id"]))
+
+    # 2) if no cache, try LLM
+    if plan is None and use_llm and LLM_ENABLED and gclient is not None:
+        used_llm = True
+        city_hint = ["Sydney", "Melbourne"]
+        catalog_llm = _scope_catalog_for_llm(body.question, catalog)
+        allowed_metrics = sorted(_catalog_keys(catalog_llm, "metrics"))
+        allowed_dims = sorted(_catalog_keys(catalog_llm, "dimensions"))
+
+        prompt = f"""
+You are a STRICT query-plan generator. Return ONLY valid JSON. No explanations, no code fences.
+
+Catalog (filtered) JSON:
+{json.dumps(catalog_llm, ensure_ascii=False)}
+
+Use ONLY these keys unless absolutely necessary:
+- metrics: {", ".join(allowed_metrics)}
+- dimensions: {", ".join(allowed_dims)}
+
+Return JSON with this schema ONLY:
+{{
+  "metrics": [],
+  "dimensions": [],
+  "filters": [],
+  "sort": [{{"field":"", "dir":"desc"}}],
+  "limit": {DEFAULT_MAX_ROWS},
+  "notes": ""
+}}
+
+Hard rules (MUST):
+
+- Prefer canonical time keys when available: use "order_year" and "order_quarter" (do NOT include both "quarter" and "order_quarter").
+- Prefer metric "discount_amount" for discounts (do NOT include both "discount_amount" and "discounts").
+- If the question contains "صافي" or "صافية" -> use metric "net_sales" (NOT gross_sales).
+- If the question contains "إجمالي" -> use metric "gross_sales".
+- If the question contains "شهري" or "شهريا" or "بالشهر" -> include dimension "month_start".
+- If the question mentions a city name -> add a filter on dimension "city".
+  City examples in this dataset: {city_hint}
+  Arabic mapping examples: "سيدني" -> "Sydney", "ملبورن" -> "Melbourne"
+
+Allowed ops: =, !=, >, >=, <, <=, in, between, ilike
+filters[] must be like: {{"field":"city","op":"=","value":"Sydney"}}
+
+Example:
+Question: "صافي المبيعات شهريا في سيدني"
+JSON:
+{{
+  "metrics": ["net_sales"],
+  "dimensions": ["month_start","city"],
+  "filters": [{{"field":"city","op":"=","value":"Sydney"}}],
+  "sort": [{{"field":"net_sales","dir":"desc"}}],
+  "limit": 60,
+  "notes": ""
+}}
+
+Now generate the JSON plan for:
+{body.question}
+""".strip()
+
+        try:
+            resp = gclient.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+            raw = (resp.text or "").strip()
+            plan = _extract_json(raw)
+        except Exception as e:
+            # IMPORTANT: don't fail the request because of quota/rate limits
+            used_llm = False
+            warnings_outer.append(f"LLM unavailable: {type(e).__name__}")
+            plan = None
+
+    # 3) fallback rule-based
+    if plan is None:
+        plan = _rule_based_plan(body.question, catalog)
+
+    # Normalize + heuristics + validate
+    plan = _normalize_plan(plan)
+    if PLAN_AUTOCORRECT:
+        plan = _autocorrect_plan(body.question, plan, catalog)
+    plan = _apply_heuristics(body.question, plan, catalog)
+    plan = _normalize_plan(plan)
+    if PLAN_AUTOCORRECT:
+        plan = _autocorrect_plan(body.question, plan, catalog)
+    if DEDUPE_SYNONYMS:
+        plan = _dedupe_synonyms(plan)
+    plan = _validate_plan(plan, catalog)
+
+    # Cache used plan
+    if use_cache:
+        model_name = GEMINI_MODEL if used_llm else "rule_based"
+        await _cache_upsert_plan(q_norm, body.question, c_hash, plan, model_name)
+
+
+    # -------------------------------------------------------------------------
+    # Execute query (compile -> guardrails -> execute)
+    #   We avoid calling bi_meta.run_query directly so we can apply python-level
+    #   guardrails before execution.
+    # -------------------------------------------------------------------------
+    t0 = time.time()
+    try:
+        compiled_sql = await _db_fetchval(
+            "SELECT bi_meta.compile_query($1::jsonb);",
+            json.dumps(plan, ensure_ascii=False),
+        )
+    except Exception as e:
+        # plan is invalid or metadata is missing
+        raise HTTPException(status_code=400, detail=f"Plan compile failed: {e}")
+
+    if not compiled_sql or not str(compiled_sql).strip():
+        raise HTTPException(status_code=500, detail="Compiler returned empty SQL.")
+
+    # Apply guardrails (single statement, SELECT/WITH only, schema allowlist, etc.)
+    try:
+        safe_sql = guard_sql_or_raise(
+            str(compiled_sql),
+            max_rows=int(plan.get("limit") or DEFAULT_MAX_ROWS),
+            allowed_schemas={"bi"},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"SQL blocked by guardrails: {e}")
+
+    # Execute safely
+    try:
+        rows = await _db_fetch(safe_sql)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB execution failed: {e}")
+
+    duration_ms = int((time.time() - t0) * 1000)
+
+    sql = safe_sql
+    warnings = []
+    if safe_sql.strip() != str(compiled_sql).strip():
+        warnings.append("Guardrails modified SQL (e.g., enforced LIMIT).")
+    suggestions = {}
+    # Log (non-blocking)
+    log_id = None
+    try:
+        log_id = await _db_fetchval(
+            """
+            INSERT INTO bi_meta.query_log(question, plan, sql, row_count, warnings, suggestions, duration_ms, explain_used)
+            VALUES ($1, $2::jsonb, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+            RETURNING id;
+            """,
+            body.question,
+            json.dumps(plan, ensure_ascii=False),
+            sql,
+            len(rows),
+            json.dumps(warnings, ensure_ascii=False),
+            json.dumps(suggestions, ensure_ascii=False),
+            duration_ms,
+            bool(explain),
+        )
+    except Exception:
+        pass
+
+    explain_obj = None
+    if explain:
+        # LLM explain (optional), otherwise deterministic explain
+        if use_llm and LLM_ENABLED and gclient is not None:
+            try:
+                prompt2 = f"""
+You are a bilingual BI analyst. Return ONLY valid JSON. No explanations.
+
+Input:
+- Question (Arabic): {body.question}
+- Plan JSON: {json.dumps(plan, ensure_ascii=False)}
+- Rows JSON (first 60): {json.dumps(rows[:60], ensure_ascii=False)}
+
+Return JSON with exactly these keys:
+{{
+  "summary_ar": "",
+  "summary_en": "",
+  "insights_ar": ["", "", ""],
+  "insights_en": ["", "", ""],
+  "followups_ar": ["", "", ""],
+  "followups_en": ["", "", ""]
+}}
+""".strip()
+                resp2 = gclient.models.generate_content(model=GEMINI_MODEL, contents=prompt2)
+                explain_obj = _extract_json((resp2.text or "").strip())
+            except Exception:
+                explain_obj = None
+
+        if explain_obj is None:
+            explain_obj = _explain_from_rows(body.question, plan, rows)
+
+    return {
+        "question": body.question,
+        "plan": plan,
+        "result": {
+            "sql": sql,
+            "rows": rows,
+            "warnings": warnings,
+            "suggestions": suggestions,
+        },
+        "explain": explain_obj,
+        "meta": {
+            "ask_version": ASK_VERSION,
+            "log_id": log_id,
+            "used_cache": used_cache,
+            "used_llm": used_llm,
+            "llm_enabled": LLM_ENABLED,
+            "duration_ms": duration_ms,
+        },
+    }
