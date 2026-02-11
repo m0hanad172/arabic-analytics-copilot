@@ -6,7 +6,7 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new()
 function Invoke-Copilot($question, $maxRows=10, $execute=$false) {
   $json = @{ question=$question; max_rows=$maxRows; execute=$execute } | ConvertTo-Json -Depth 5
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-  return Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/query" `
+  return Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/query" `
     -ContentType "application/json; charset=utf-8" -Body $bytes
 }
 

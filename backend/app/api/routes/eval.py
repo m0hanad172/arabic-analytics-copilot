@@ -3,7 +3,7 @@ import time
 from fastapi import APIRouter, Query
 
 # Reuse helpers from /ask
-from backend.app.api.routes.ask import (
+from backend.app.services.ask.runner import (
     _get_catalog,
     _extract_json,
     _validate_plan,

@@ -1,0 +1,70 @@
+/* src/index.css */
+/* Minimal + Bootstrap-friendly. No hard-coded theme colors. */
+
+html, body, #root { height: 100%; }
+body { margin: 0; background: #0b0f14; color: rgba(255,255,255,.9); }
+
+
+/* Placeholders: always readable in light/dark */
+input::placeholder,
+textarea::placeholder {
+  color: var(--bs-secondary-color) !important;
+  opacity: 1;
+}
+
+/* Results area: force LTR if you wrap results with .aac-results-ltr */
+.aac-results-ltr {
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
+}
+
+.aac-results-ltr table,
+.aac-results-ltr thead,
+.aac-results-ltr tbody,
+.aac-results-ltr tr,
+.aac-results-ltr th,
+.aac-results-ltr td {
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
+  text-align: left !important;
+}
+
+/* ✅ Because bootstrap.rtl flips text-start/text-end */
+.aac-results-ltr .text-start,
+.aac-results-ltr .text-end {
+  text-align: left !important;
+}
+
+/* ✅ Make sure cells never drift */
+.aac-results-ltr .aac-cell {
+  text-align: left !important;
+  direction: ltr !important;
+}
+
+/* Sticky header helper (optional) */
+.aac-sticky-head th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bs-body-bg);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+[data-bs-theme="dark"] .aac-sticky-head th {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* Tab text readable in both themes */
+.nav-tabs .nav-link {
+  color: var(--bs-body-color);
+}
+
+.nav-tabs .nav-link:hover {
+  color: var(--bs-body-color);
+  opacity: 0.85;
+}
+
+.nav-tabs .nav-link.active {
+  color: var(--bs-body-color);
+}
+

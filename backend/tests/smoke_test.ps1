@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = "Stop"
 
 $base = $env:BASE_URL
-if ([string]::IsNullOrWhiteSpace($base)) { $base = "http://127.0.0.1:8000" }
+if ([string]::IsNullOrWhiteSpace($base)) { $base = "http://127.0.0.1:8000/api" }
 
 # Ensure console can display UTF-8
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
