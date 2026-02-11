@@ -1,0 +1,399 @@
+﻿/* =========================
+   Arabic Analytics Copilot
+   Enterprise Theme (Bootstrap-friendly)
+   ========================= */
+
+:root {
+  --aac-bg: #0f1216;
+  --aac-surface: #151a20;
+  --aac-surface-2: #11161c;
+  --aac-border: rgba(255, 255, 255, 0.10);
+  --aac-border-2: rgba(255, 255, 255, 0.14);
+  --aac-text: rgba(255, 255, 255, 0.92);
+  --aac-muted: rgba(255, 255, 255, 0.62);
+  --aac-muted-2: rgba(255, 255, 255, 0.46);
+
+  --aac-accent: #2f81f7;
+  --aac-accent-2: #22c55e;
+  --aac-danger: #ef4444;
+  --aac-warning: #f59e0b;
+
+  --aac-radius: 16px;
+  --aac-radius-sm: 12px;
+
+  --aac-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --aac-shadow-soft: 0 8px 18px rgba(0, 0, 0, 0.22);
+  --aac-glow: 0 0 0 3px rgba(47, 129, 247, 0.20);
+
+  --aac-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Optional: if you wrap app with data-bs-theme="dark" */
+[data-bs-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* Page background layer */
+.aac-app-bg {
+  background:
+    radial-gradient(1200px 800px at 15% 10%, rgba(47,129,247,0.12), transparent 60%),
+    radial-gradient(900px 700px at 85% 15%, rgba(34,197,94,0.08), transparent 55%),
+    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 35%),
+    var(--aac-bg);
+  min-height: 100%;
+}
+
+/* Generic panels/cards */
+.aac-card,
+.aac-panel {
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 55%), var(--aac-surface);
+  border: 1px solid var(--aac-border);
+  border-radius: var(--aac-radius);
+  box-shadow: var(--aac-shadow-soft);
+}
+
+.aac-card {
+  padding: 16px;
+}
+
+.aac-panel {
+  padding: 18px;
+}
+
+.aac-card:hover,
+.aac-panel:hover {
+  border-color: var(--aac-border-2);
+}
+
+/* Subtle inner section */
+.aac-inset {
+  background: var(--aac-surface-2);
+  border: 1px solid var(--aac-border);
+  border-radius: var(--aac-radius-sm);
+}
+
+/* Typography helpers */
+.aac-title {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--aac-text);
+}
+.aac-muted { color: var(--aac-muted); }
+.aac-muted-2 { color: var(--aac-muted-2); }
+.mono { font-family: var(--aac-mono); }
+
+/* Badges (chips) */
+.aac-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  padding: .22rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--aac-border);
+  background: rgba(255,255,255,0.04);
+  color: var(--aac-text);
+  font-size: 12px;
+  line-height: 1;
+}
+.aac-chip--on {
+  border-color: rgba(34,197,94,0.35);
+  background: rgba(34,197,94,0.12);
+}
+.aac-chip--warn {
+  border-color: rgba(245,158,11,0.35);
+  background: rgba(245,158,11,0.10);
+}
+.aac-chip--danger {
+  border-color: rgba(239,68,68,0.35);
+  background: rgba(239,68,68,0.12);
+}
+
+/* Buttons */
+.btn.aac-btn {
+  border-radius: 12px;
+}
+.btn.aac-btn-primary {
+  background: linear-gradient(180deg, rgba(47,129,247,0.95), rgba(47,129,247,0.75));
+  border-color: rgba(47,129,247,0.60);
+}
+.btn.aac-btn-primary:hover { filter: brightness(1.05); }
+.btn.aac-btn-primary:focus { box-shadow: var(--aac-glow); }
+
+.btn.aac-btn-ghost {
+  background: rgba(255,255,255,0.04);
+  border-color: var(--aac-border);
+}
+.btn.aac-btn-ghost:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: var(--aac-border-2);
+}
+
+/* Inputs */
+.form-control,
+.form-select,
+.input-group-text {
+  background-color: rgba(255,255,255,0.04) !important;
+  border-color: var(--aac-border) !important;
+  color: var(--aac-text) !important;
+}
+.form-control::placeholder { color: rgba(255,255,255,0.35) !important; }
+.form-control:focus,
+.form-select:focus {
+  border-color: rgba(47,129,247,0.55) !important;
+  box-shadow: var(--aac-glow) !important;
+}
+
+/* Nav tabs (ResultTabs) */
+.nav-tabs {
+  border-bottom: 1px solid var(--aac-border) !important;
+}
+.nav-tabs .nav-link {
+  border: 1px solid transparent !important;
+  color: rgba(255,255,255,0.70) !important;
+  border-top-left-radius: 12px !important;
+  border-top-right-radius: 12px !important;
+}
+.nav-tabs .nav-link:hover {
+  color: rgba(255,255,255,0.90) !important;
+  background: rgba(255,255,255,0.03) !important;
+}
+.nav-tabs .nav-link.active {
+  color: var(--aac-text) !important;
+  background: rgba(255,255,255,0.05) !important;
+  border-color: var(--aac-border) var(--aac-border) transparent var(--aac-border) !important;
+}
+
+/* CodePanel */
+.codebox {
+  border: 1px solid var(--aac-border);
+  border-radius: var(--aac-radius);
+  overflow: hidden;
+  background: var(--aac-surface-2);
+  box-shadow: var(--aac-shadow-soft);
+}
+.codehead {
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--aac-border);
+}
+.scroll-y { overflow-y: auto; }
+.codebox .mono {
+  font-family: var(--aac-mono);
+  font-size: 13px;
+}
+
+/* Result table */
+.table {
+  color: var(--aac-text) !important;
+}
+.table thead th {
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--aac-border) !important;
+  color: rgba(255,255,255,0.88) !important;
+}
+.table td, .table th {
+  border-color: rgba(255,255,255,0.08) !important;
+}
+.table-hover tbody tr:hover td {
+  background: rgba(255,255,255,0.03) !important;
+}
+
+/* Alerts / error boxes */
+.aac-alert {
+  border-radius: var(--aac-radius);
+  border: 1px solid rgba(239,68,68,0.35);
+  background: rgba(239,68,68,0.12);
+  color: rgba(255,255,255,0.92);
+}
+
+/* =========================
+   Sidebar: make History scroll nicely
+   ========================= */
+
+.aac-sidebar{
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;          /* ✅ مهم مع flex + overflow */
+  gap: 12px;
+}
+
+/* settings block stays natural height */
+.aac-sidebar-settings{
+  flex: 0 0 auto;
+}
+
+/* history block takes the remaining height */
+.aac-sidebar-history{
+  flex: 1 1 auto;
+  min-height: 0;          /* ✅ بدونها الـ scroll يخرب */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* inside HistoryPanel */
+.aac-history-list{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* make time/chips readable + stable width digits */
+.aac-sidebar-history .badge{
+  font-variant-numeric: tabular-nums;
+}
+
+/* optional: nicer scrollbar (Windows/Chrome) */
+.aac-history-list::-webkit-scrollbar{
+  width: 10px;
+}
+.aac-history-list::-webkit-scrollbar-thumb{
+  background: rgba(255,255,255,0.10);
+  border-radius: 999px;
+}
+.aac-history-list::-webkit-scrollbar-thumb:hover{
+  background: rgba(255,255,255,0.16);
+}
+
+/* Smooth transitions */
+.aac-card,
+.aac-panel,
+.nav-tabs .nav-link,
+.btn,
+.form-control,
+.form-select {
+  transition: all 160ms ease;
+}
+
+/* Responsive tweaks */
+@media (max-width: 992px) {
+  .aac-card,
+  .aac-panel {
+    border-radius: 14px;
+  }
+}
+
+/* =========================
+   Light theme overrides
+   ========================= */
+[data-bs-theme="light"] {
+  --aac-bg: #f6f7fb;
+  --aac-surface: #ffffff;
+  --aac-surface-2: #f2f4f7;
+
+  --aac-border: rgba(17, 24, 39, 0.12);
+  --aac-border-2: rgba(17, 24, 39, 0.18);
+
+  --aac-text: rgba(17, 24, 39, 0.92);
+  --aac-muted: rgba(17, 24, 39, 0.62);
+  --aac-muted-2: rgba(17, 24, 39, 0.46);
+
+  --aac-shadow: 0 10px 30px rgba(17, 24, 39, 0.10);
+  --aac-shadow-soft: 0 8px 18px rgba(17, 24, 39, 0.08);
+}
+
+/* Ensure app uses our theme variables */
+.aac-app-bg {
+  min-height: 100vh;
+  background: var(--aac-bg);
+  color: var(--aac-text);
+}
+
+/* Light theme readability fixes */
+[data-bs-theme="light"] .nav-link,
+[data-bs-theme="light"] .nav-tabs .nav-link {
+  color: rgba(17, 24, 39, 0.82);
+}
+
+[data-bs-theme="light"] .nav-tabs .nav-link.active {
+  color: rgba(17, 24, 39, 0.92);
+}
+
+[data-bs-theme="light"] .form-control::placeholder,
+[data-bs-theme="light"] textarea::placeholder,
+[data-bs-theme="light"] input::placeholder {
+  color: rgba(17, 24, 39, 0.45);
+  opacity: 1;
+}
+
+/* Dark only: force browser controls (select dropdown) to be dark */
+:root {
+  color-scheme: dark;
+}
+
+/* Make selects readable in dark */
+[data-bs-theme="dark"] select,
+[data-bs-theme="dark"] .form-select,
+[data-bs-theme="dark"] .form-control {
+  color: #f8f9fa !important;
+  background-color: #212529 !important;
+  border-color: rgba(255, 255, 255, 0.15) !important;
+}
+
+/* Make dropdown options readable (important on Windows/Chrome) */
+[data-bs-theme="dark"] select option,
+[data-bs-theme="dark"] .form-select option {
+  color: #f8f9fa !important;
+  background-color: #212529 !important;
+}
+
+/* Prevent Prism toolbar duplication (Copy/JSON bar) */
+.codebox .code-toolbar > .toolbar {
+  display: none !important;
+}
+
+table td.text-end, table th.text-end {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ResultTable header stack */
+.aac-th-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aac-th-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+}
+
+.aac-th-label { font-weight: 600; }
+.aac-th-icons { display: inline-flex; gap: 6px; opacity: .85; }
+
+.aac-history-scroll {
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.aac-history-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.aac-history-run {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.aac-history-run .btn {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+.aac-history-q {
+  font-size: 13.5px;
+  line-height: 1.5;
+}

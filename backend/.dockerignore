@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+
+# Git / IDE
+.git/
+.vscode/
+.idea/
+
+# Data 
+data/
+datasets/
+*.csv
+*.parquet
+*.zip
+*.tar
+*.gz
+*.bak
+
+# Logs
+logs/
+*.log
