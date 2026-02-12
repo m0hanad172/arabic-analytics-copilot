@@ -1,5 +1,4 @@
-﻿import os
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 
 from backend.app.api.routes.health import router as health_router
 from backend.app.api.routes.schema import router as schema_router
@@ -7,34 +6,31 @@ from backend.app.api.routes.query import router as query_router
 from backend.app.api.routes.ask import router as ask_router
 from backend.app.api.routes.logs import router as logs_router
 from backend.app.api.routes.eval import router as eval_router
+from backend.app.api.routes.transcribe import router as transcribe_router
+
+from backend.app.services.stt.transcriber import _get_model
+import os
 
 API_PREFIX = "/api"
 app = FastAPI(
-    title="Arabic Analytics Copilot",
+    title="Arabic Analytics Copilot (Phase 2)",
     version="0.1.0",
     description="Arabic -> SQL backend scaffold with Postgres semantic layer allowlist.",
 )
 
-def _is_true(v: str | None) -> bool:
-    return (v or "").strip().lower() in ("1", "true", "yes", "y", "on")
 
-STT_ENABLED = _is_true(os.getenv("STT_ENABLED", "0"))
-STT_WARMUP = _is_true(os.getenv("STT_WARMUP", "0"))
 
 @app.on_event("startup")
-def startup_hooks():
-    if not STT_ENABLED:
-        print("[STT] disabled (STT_ENABLED=0)")
-        return
-    if not STT_WARMUP:
-        print("[STT] warmup skipped (STT_WARMUP=0)")
+def warmup_whisper():
+    if os.getenv("STT_WARMUP", "1") != "1":
+        print("[STT] warmup skipped")
         return
     try:
-        from backend.app.services.stt.transcriber import _get_model
         _get_model()
         print("[STT] warmup ok")
     except Exception as e:
         print("[STT] warmup failed:", e)
+
 
 @app.middleware("http")
 async def force_utf8_json(request, call_next):
@@ -44,6 +40,7 @@ async def force_utf8_json(request, call_next):
         response.headers["content-type"] = "application/json; charset=utf-8"
     return response
 
+
 # Routers
 app.include_router(health_router, prefix=API_PREFIX)
 app.include_router(schema_router, prefix=API_PREFIX)
@@ -51,12 +48,4 @@ app.include_router(query_router, prefix=API_PREFIX)
 app.include_router(ask_router, prefix=API_PREFIX)
 app.include_router(logs_router, prefix=API_PREFIX)
 app.include_router(eval_router, prefix=API_PREFIX)
-
-# Transcribe router (conditional)
-if STT_ENABLED:
-    try:
-        from backend.app.api.routes.transcribe import router as transcribe_router
-        app.include_router(transcribe_router, prefix=API_PREFIX)
-        print("[STT] router enabled")
-    except Exception as e:
-        print("[STT] router import failed, STT disabled:", e)
+app.include_router(transcribe_router, prefix=API_PREFIX)
