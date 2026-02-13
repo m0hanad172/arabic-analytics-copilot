@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { toPng } from "html-to-image";
 import {
   ResponsiveContainer,
   BarChart,
@@ -139,6 +140,8 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
   const [aggType, setAggType] = useState<Agg>("sum");
   const [topN, setTopN] = useState<number>(10);
 
+  const chartRef = React.useRef<HTMLDivElement | null>(null);
+
   // ✅ Auto-suggest (non-breaking): only if empty/invalid after results change
   useEffect(() => {
     if (!xCandidates.length) return;
@@ -249,50 +252,70 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
       ) : !canRender ? (
         <div className="text-body-secondary">Pick X/Y (or use count) to render.</div>
       ) : (
-        <div className="border rounded p-2">
-          <ResponsiveContainer width="100%" height={380}>
-            {chartType === "bar" ? (
-              <BarChart data={prepared.data}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="x" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                {prepared.series.length
-                  ? prepared.series.map((s, i) => (
-                      <Bar key={s} dataKey={s} fill={SERIES_COLORS[i % SERIES_COLORS.length]} />
-                    ))
-                  : <Bar dataKey="value" fill={SERIES_COLORS[0]} />}
-              </BarChart>
-            ) : (
-              <LineChart data={prepared.data}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="x" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                {prepared.series.length
-                  ? prepared.series.map((s, i) => (
+        <>
+          <div className="d-flex justify-content-end mb-2">
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-secondary"
+              onClick={async () => {
+                if (!chartRef.current) return;
+                const dataUrl = await toPng(chartRef.current, { cacheBust: true, pixelRatio: 2 });
+                const a = document.createElement("a");
+                a.href = dataUrl;
+                a.download = "aac_chart.png";
+                a.click();
+              }}
+            >
+              <i className="bi bi-download ms-2" />
+              Export PNG
+            </button>
+          </div>
+
+          <div className="border rounded p-2" ref={chartRef}>
+            <ResponsiveContainer width="100%" height={380}>
+              {chartType === "bar" ? (
+                <BarChart data={prepared.data}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="x" />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  {prepared.series.length
+                    ? prepared.series.map((s, i) => (
+                        <Bar key={s} dataKey={s} fill={SERIES_COLORS[i % SERIES_COLORS.length]} />
+                      ))
+                    : <Bar dataKey="value" fill={SERIES_COLORS[0]} />}
+                </BarChart>
+              ) : (
+                <LineChart data={prepared.data}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="x" />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  {prepared.series.length
+                    ? prepared.series.map((s, i) => (
+                        <Line
+                          key={s}
+                          type="monotone"
+                          dataKey={s}
+                          dot={false}
+                          stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
+                        />
+                      ))
+                    : (
                       <Line
-                        key={s}
                         type="monotone"
-                        dataKey={s}
+                        dataKey="value"
                         dot={false}
-                        stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
+                        stroke={SERIES_COLORS[0]}
                       />
-                    ))
-                  : (
-                    <Line
-                      type="monotone"
-                      dataKey="value"
-                      dot={false}
-                      stroke={SERIES_COLORS[0]}
-                    />
-                  )}
-              </LineChart>
-            )}
-          </ResponsiveContainer>
-        </div>
+                    )}
+                </LineChart>
+              )}
+            </ResponsiveContainer>
+          </div>
+        </>
       )}
     </div>
   );
