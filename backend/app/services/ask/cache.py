@@ -17,7 +17,7 @@ async def _cache_get_plan(question_norm: str, catalog_hash: str, db_fetchrow, en
     try:
         row = await db_fetchrow(
             """
-            SELECT id, plan
+            SELECT id, plan, model
             FROM bi_meta.plan_cache
             WHERE question_norm=$1 AND catalog_hash=$2
             ORDER BY updated_at DESC
@@ -31,8 +31,8 @@ async def _cache_get_plan(question_norm: str, catalog_hash: str, db_fetchrow, en
         row["plan"] = ensure_json_obj(row.get("plan"))
         return row
     except Exception:
-        # cache table may not exist yet
         return None
+
 async def _cache_upsert_plan(question_norm: str, question_raw: str, catalog_hash: str, plan: dict, model: str, db_fetchval) -> None:
     try:
         await db_fetchval(
@@ -41,11 +41,16 @@ async def _cache_upsert_plan(question_norm: str, question_raw: str, catalog_hash
             VALUES ($1, $2, $3, $4::jsonb, $5, 0, now())
             ON CONFLICT (question_norm, catalog_hash)
             DO UPDATE SET
-              question_raw = EXCLUDED.question_raw,
-              plan        = EXCLUDED.plan,
-              model       = EXCLUDED.model,
-              updated_at  = now(),
-              last_used_at = now();
+            question_raw = EXCLUDED.question_raw,
+            plan        = EXCLUDED.plan,
+            model       = EXCLUDED.model,
+            last_used_at = now(),
+            updated_at  = CASE
+                WHEN bi_meta.plan_cache.plan  IS DISTINCT FROM EXCLUDED.plan
+                    OR bi_meta.plan_cache.model IS DISTINCT FROM EXCLUDED.model
+                THEN now()
+                ELSE bi_meta.plan_cache.updated_at
+            END;
             """,
             question_norm,
             question_raw,

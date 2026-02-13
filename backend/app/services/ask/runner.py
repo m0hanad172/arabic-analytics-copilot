@@ -72,6 +72,20 @@ GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL", "gemini-3-flash") or "").strip()
 
 LLM_ENABLED = bool(GEMINI_API_KEY) and genai is not None
+# --- Gemini quota backoff (429 / RESOURCE_EXHAUSTED) ---
+LLM_BACKOFF_SECONDS = int(os.getenv("LLM_BACKOFF_SECONDS", "600"))  # default 10 min
+_llm_disabled_until = 0.0  # epoch seconds
+
+def _is_quota_error(msg: str) -> bool:
+    m = (msg or "").upper()
+    return ("429" in m) or ("RESOURCE_EXHAUSTED" in m) or ("QUOTA" in m) or ("RATE LIMIT" in m)
+
+def _backoff_active() -> bool:
+    return time.time() < _llm_disabled_until
+
+def _set_backoff(seconds: int) -> None:
+    global _llm_disabled_until
+    _llm_disabled_until = time.time() + max(0, int(seconds))
 
 gclient = None
 
@@ -808,8 +822,7 @@ async def _cache_touch(cache_id: int) -> None:
             """
             UPDATE bi_meta.plan_cache
             SET hits = hits + 1,
-                last_used_at = now(),
-                updated_at = now()
+                last_used_at = now()
             WHERE id = $1
             RETURNING id;
             """,
@@ -817,6 +830,7 @@ async def _cache_touch(cache_id: int) -> None:
         )
     except Exception:
         pass
+
 
 
 def _explain_from_rows(question: str, plan: dict, rows: List[dict]) -> dict:
@@ -903,21 +917,25 @@ async def ask(
     used_llm = False
     warnings_outer: List[str] = []
 
+
     # 1) cache first
     if use_cache:
         cached = await _cache_get_plan(q_norm, c_hash, _db_fetchrow, _ensure_json_obj)
-        # If cache returned a rule_based plan but caller requested LLM, ignore cache so LLM can run.
-        if use_llm and cached and str(cached.get('notes','')).strip().lower() == 'rule_based':
-            cached = None
-            used_cache = False
+
+        if cached and cached.get("plan"):
+            cached_plan = cached["plan"] if isinstance(cached["plan"], dict) else {}
+            cached_model = str(cached.get("model") or "").strip().lower()
+            cached_notes = str(cached_plan.get("notes") or "").strip().lower()
+
+            if use_llm and (cached_model == "rule_based" or cached_notes == "rule_based"):
+                # إذا Gemini عليه backoff بسبب quota، لا نتجاهل الكاش
+                if LLM_ENABLED and (not _backoff_active()):
+                    cached = None
+
+
         if cached and cached.get("plan"):
             plan = cached["plan"]
             used_cache = True
-            # prefer LLM over cached rule_based plan when explicitly requested
-            if use_llm and isinstance(plan, dict) and plan.get('notes') == 'rule_based':
-                plan = None
-                used_cache = False
-
             if cached.get("id") is not None:
                 await _cache_touch(int(cached["id"]))
 
@@ -927,7 +945,14 @@ async def ask(
     llm_error = None
 
 # 2) if no cache, try LLM
-    if plan is None and use_llm and LLM_ENABLED:
+    # Skip LLM if backoff active (quota exhausted recently)
+    if plan is None and use_llm and LLM_ENABLED and _backoff_active():
+        llm_attempted = False
+        llm_error = "Backoff active (quota exhausted recently)"
+        warnings_outer.append("LLM skipped: quota backoff active.")
+
+
+    if plan is None and use_llm and LLM_ENABLED and (not _backoff_active()):
         try:
             gclient = _get_gclient()
             if gclient is None:
@@ -1004,7 +1029,8 @@ async def ask(
                 resp = gclient.models.generate_content(model=GEMINI_MODEL, contents=prompt)
             except Exception as e:
                 msg = str(e)
-                if "503" in msg or "UNAVAILABLE" in msg:
+                # retry only for transient 503/unavailable (NOT quota)
+                if ("503" in msg or "UNAVAILABLE" in msg) and (not _is_quota_error(msg)):
                     time.sleep(0.35)
                     resp = gclient.models.generate_content(model=GEMINI_MODEL, contents=prompt)
                 else:
@@ -1014,6 +1040,10 @@ async def ask(
 
         except Exception as e:
             used_llm = False
+            msg = str(e)
+            if _is_quota_error(msg):
+                _set_backoff(LLM_BACKOFF_SECONDS)
+
             llm_error = f"{type(e).__name__}: {str(e)[:180]}"
             warnings_outer.append(f"LLM failed: {llm_error}")
             plan = None
@@ -1036,10 +1066,12 @@ async def ask(
     )
 
 
-    # Cache used plan
-    if use_cache:
+    # Cache used plan (ONLY if we generated a new plan)
+    if use_cache and not used_cache:
         model_name = GEMINI_MODEL if used_llm else "rule_based"
         await _cache_upsert_plan(q_norm, body.question, c_hash, plan, model_name, _db_fetchval)
+
+
 
 
     # -------------------------------------------------------------------------
@@ -1088,8 +1120,11 @@ async def ask(
     try:
         log_id = await _db_fetchval(
             """
-            INSERT INTO bi_meta.query_log(question, plan, sql, row_count, warnings, suggestions, duration_ms, explain_used)
-            VALUES ($1, $2::jsonb, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+            INSERT INTO bi_meta.query_log(
+                question, plan, sql, row_count, warnings, suggestions, duration_ms,
+                used_cache, used_llm, explain_used
+            )
+            VALUES ($1, $2::jsonb, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
             RETURNING id;
             """,
             body.question,
@@ -1099,6 +1134,8 @@ async def ask(
             json.dumps(warnings, ensure_ascii=False),
             json.dumps(suggestions, ensure_ascii=False),
             duration_ms,
+            bool(used_cache),
+            bool(used_llm),
             bool(explain),
         )
     except Exception:
