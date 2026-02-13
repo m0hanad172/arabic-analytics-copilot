@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -14,6 +14,15 @@ import {
 
 type ChartType = "bar" | "line";
 type Agg = "sum" | "avg" | "count" | "min" | "max";
+
+const SERIES_COLORS = [
+  "rgb(var(--bs-primary-rgb))",
+  "rgb(var(--bs-info-rgb))",
+  "rgb(var(--bs-success-rgb))",
+  "rgb(var(--bs-warning-rgb))",
+  "rgb(var(--bs-danger-rgb))",
+  "rgb(var(--bs-secondary-rgb))",
+];
 
 function toNumber(v: any): number | null {
   if (v === null || v === undefined) return null;
@@ -130,6 +139,21 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
   const [aggType, setAggType] = useState<Agg>("sum");
   const [topN, setTopN] = useState<number>(10);
 
+  // ✅ Auto-suggest (non-breaking): only if empty/invalid after results change
+  useEffect(() => {
+    if (!xCandidates.length) return;
+    setXField((prev) => (prev && xCandidates.includes(prev) ? prev : xCandidates[0]));
+  }, [xCandidates]);
+
+  useEffect(() => {
+    if (!numeric.length) return;
+    setYField((prev) => (prev && numeric.includes(prev) ? prev : numeric[0]));
+  }, [numeric]);
+
+  useEffect(() => {
+    setGroupField((prev) => (prev && columns.includes(prev) ? prev : ""));
+  }, [columns]);
+
   const canRender =
     rows.length > 0 &&
     xField &&
@@ -145,7 +169,11 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
       <div className="d-flex flex-wrap gap-2 align-items-end mb-3">
         <div>
           <label className="form-label mb-1">Chart</label>
-          <select className="form-select form-select-sm" value={chartType} onChange={(e) => setChartType(e.target.value as ChartType)}>
+          <select
+            className="form-select form-select-sm"
+            value={chartType}
+            onChange={(e) => setChartType(e.target.value as ChartType)}
+          >
             <option value="bar">Bar</option>
             <option value="line">Line</option>
           </select>
@@ -155,16 +183,25 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
           <label className="form-label mb-1">X</label>
           <select className="form-select form-select-sm" value={xField} onChange={(e) => setXField(e.target.value)}>
             {xCandidates.map((c) => (
-              <option key={c} value={c}>{c}</option>
+              <option key={c} value={c}>
+                {c}
+              </option>
             ))}
           </select>
         </div>
 
         <div>
           <label className="form-label mb-1">Y</label>
-          <select className="form-select form-select-sm" value={yField} onChange={(e) => setYField(e.target.value)} disabled={aggType === "count"}>
+          <select
+            className="form-select form-select-sm"
+            value={yField}
+            onChange={(e) => setYField(e.target.value)}
+            disabled={aggType === "count"}
+          >
             {numeric.map((c) => (
-              <option key={c} value={c}>{c}</option>
+              <option key={c} value={c}>
+                {c}
+              </option>
             ))}
           </select>
         </div>
@@ -173,9 +210,13 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
           <label className="form-label mb-1">Group (optional)</label>
           <select className="form-select form-select-sm" value={groupField} onChange={(e) => setGroupField(e.target.value)}>
             <option value="">(none)</option>
-            {columns.filter((c) => c !== xField && c !== yField).map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
+            {columns
+              .filter((c) => c !== xField && c !== yField)
+              .map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
           </select>
         </div>
 
@@ -192,7 +233,14 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
 
         <div style={{ width: 110 }}>
           <label className="form-label mb-1">Top N</label>
-          <input className="form-control form-control-sm" type="number" min={1} max={200} value={topN} onChange={(e) => setTopN(Number(e.target.value || 10))} />
+          <input
+            className="form-control form-control-sm"
+            type="number"
+            min={1}
+            max={200}
+            value={topN}
+            onChange={(e) => setTopN(Number(e.target.value || 10))}
+          />
         </div>
       </div>
 
@@ -210,7 +258,11 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
                 <YAxis />
                 <Tooltip />
                 <Legend />
-                {prepared.series.length ? prepared.series.map((s) => <Bar key={s} dataKey={s} />) : <Bar dataKey="value" />}
+                {prepared.series.length
+                  ? prepared.series.map((s, i) => (
+                      <Bar key={s} dataKey={s} fill={SERIES_COLORS[i % SERIES_COLORS.length]} />
+                    ))
+                  : <Bar dataKey="value" fill={SERIES_COLORS[0]} />}
               </BarChart>
             ) : (
               <LineChart data={prepared.data}>
@@ -219,7 +271,24 @@ export function VizTab(props: { rows: any[]; columns: string[] }) {
                 <YAxis />
                 <Tooltip />
                 <Legend />
-                {prepared.series.length ? prepared.series.map((s) => <Line key={s} type="monotone" dataKey={s} dot={false} />) : <Line type="monotone" dataKey="value" dot={false} />}
+                {prepared.series.length
+                  ? prepared.series.map((s, i) => (
+                      <Line
+                        key={s}
+                        type="monotone"
+                        dataKey={s}
+                        dot={false}
+                        stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
+                      />
+                    ))
+                  : (
+                    <Line
+                      type="monotone"
+                      dataKey="value"
+                      dot={false}
+                      stroke={SERIES_COLORS[0]}
+                    />
+                  )}
               </LineChart>
             )}
           </ResponsiveContainer>
