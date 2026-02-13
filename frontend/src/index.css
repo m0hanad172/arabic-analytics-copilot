@@ -68,3 +68,9 @@ textarea::placeholder {
   color: var(--bs-body-color);
 }
 
+.viz-tab svg text { fill: var(--bs-body-color); }
+.viz-tab .recharts-cartesian-axis-line,
+.viz-tab .recharts-cartesian-grid line,
+.viz-tab .recharts-cartesian-axis-tick line {
+  stroke: var(--bs-border-color);
+}

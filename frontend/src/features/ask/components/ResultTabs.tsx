@@ -2,13 +2,15 @@
 import type { AskResponse } from "../../../types/api";
 import { ResultTable } from "./ResultTable";
 import { CodePanel } from "./CodePanel";
+import { VizTab } from "./VizTab";
 
-type TabKey = "results" | "sql" | "plan" | "meta" | "explain";
+type TabKey = "results" | "sql" | "plan" | "meta" | "explain" | "viz";
 
 export function ResultTabs({ data }: { data?: AskResponse }) {
   const [tab, setTab] = useState<TabKey>("results");
 
   const rows = data?.result?.rows ?? [];
+  const columns = useMemo(() => (rows[0] ? Object.keys(rows[0]) : []), [rows]);
   const sql = data?.result?.sql ?? "--";
   const plan = data?.plan ?? {};
   const meta = data?.meta ?? {};
@@ -51,6 +53,9 @@ export function ResultTabs({ data }: { data?: AskResponse }) {
         </li>
         <li className="nav-item">
           <TabBtn k="explain" label="Explain" icon="bi-lightbulb" />
+        </li>
+        <li className="nav-item">
+          <TabBtn k="viz" label="Viz" icon="bi-bar-chart" />
         </li>
       </ul>
 
@@ -217,6 +222,12 @@ export function ResultTabs({ data }: { data?: AskResponse }) {
           ) : (
             <div className="text-secondary">فعّل Explain من Settings.</div>
           )}
+        </div>
+      )}
+
+      {tab === "viz" && (
+        <div className="tab-pane show active aac-results-ltr">
+          <VizTab rows={rows} columns={columns} />
         </div>
       )}
     </>
