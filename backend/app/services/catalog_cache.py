@@ -69,6 +69,9 @@ def _augment_catalog(catalog: dict) -> CatalogT:
 
     # Ensure key metrics
     ensure(metrics, "discount_amount")
+    ensure(metrics, "order_count")
+
+
 
     return {"metrics": metrics, "dimensions": dims}
 

@@ -245,6 +245,33 @@ SELECT jsonb_build_object(
 );
 $$;
 
+INSERT INTO bi_meta.metrics (
+  metric_key,
+  display_name_ar,
+  display_name_en,
+  agg,
+  sql_expression,
+  data_type,
+  format_hint
+)
+VALUES (
+  'order_count',
+  'عدد السطور',
+  'Row Count',
+  'count',
+  'COUNT(*)::bigint',
+  'integer',
+  NULL
+)
+ON CONFLICT (metric_key) DO UPDATE
+SET
+  display_name_ar = EXCLUDED.display_name_ar,
+  display_name_en = EXCLUDED.display_name_en,
+  agg            = EXCLUDED.agg,
+  sql_expression = EXCLUDED.sql_expression,
+  data_type      = EXCLUDED.data_type,
+  format_hint    = EXCLUDED.format_hint;
+
 -- Optional convenience wrapper
 CREATE OR REPLACE FUNCTION bi_meta.get_catalog()
 RETURNS jsonb
