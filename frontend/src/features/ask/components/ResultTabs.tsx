@@ -227,7 +227,8 @@ export function ResultTabs({ data }: { data?: AskResponse }) {
 
       {tab === "viz" && (
         <div className="tab-pane show active aac-results-ltr">
-          <VizTab rows={rows} columns={columns} />
+          <VizTab rows={rows} columns={columns} sql={sql} />
+
         </div>
       )}
     </>

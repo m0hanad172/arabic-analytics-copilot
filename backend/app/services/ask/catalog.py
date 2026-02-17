@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-# Extracted from services/ask/runner.py (Step1)
+# Extracted from services/ask/runner.py
 # Goal: keep runner.py smaller with no behavior change.
 
 def _augment_catalog(catalog: dict) -> dict:
     """Augment catalog with known safe keys that exist in bi.vw_fact_sales_line_clean.
 
-    Enables quarter/year grouping and discounts metric even if the DB catalog is missing them.
+    Enables quarter/year grouping and key metrics even if the DB catalog is missing them.
     """
     if not isinstance(catalog, dict):
         return catalog
@@ -18,11 +18,14 @@ def _augment_catalog(catalog: dict) -> dict:
             return
         if not isinstance(arr, list):
             return
+
+        # list[dict]
         if arr and isinstance(arr[0], dict):
             keys = {(x.get("key") or x.get("name") or "").strip() for x in arr if isinstance(x, dict)}
             if key not in keys:
                 catalog[group].append(default_obj or {"key": key, "label": key})
         else:
+            # list[str]
             keys = {str(x).strip() for x in arr}
             if key not in keys:
                 catalog[group].append(key)
@@ -33,5 +36,6 @@ def _augment_catalog(catalog: dict) -> dict:
 
     # Metrics
     _ensure_key("metrics", "discount_amount", {"key": "discount_amount", "label": "discount_amount"})
+    _ensure_key("metrics", "order_count", {"key": "order_count", "label": "order_count"})
 
     return catalog

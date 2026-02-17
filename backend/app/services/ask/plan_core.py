@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 from fastapi import HTTPException
 import re
@@ -29,8 +29,10 @@ def _catalog_keys(catalog: dict, key: str) -> Set[str]:
                     out.add(str(k).strip())
     return out
 
+
 DEFAULT_MAX_ROWS = int(os.getenv("DEFAULT_MAX_ROWS", "200"))
 _ARABIC_DIGIT_MAP = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
 
 def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     plan = dict(plan or {})
@@ -86,6 +88,7 @@ def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
 
     return plan
 
+
 def _validate_plan(plan: Dict[str, Any], catalog: dict) -> Dict[str, Any]:
     metrics_ok = _catalog_keys(catalog, "metrics")
     dims_ok = _catalog_keys(catalog, "dimensions")
@@ -124,33 +127,84 @@ def _validate_plan(plan: Dict[str, Any], catalog: dict) -> Dict[str, Any]:
 # Heuristics + rule-based fallback
 # -----------------------------------------------------------------------------
 # --- Top-N parsing helpers (v3) ------------------------------------------------
-_ARABIC_DIGIT_MAP = str.maketrans({
-    "٠":"0","١":"1","٢":"2","٣":"3","٤":"4","٥":"5","٦":"6","٧":"7","٨":"8","٩":"9",
-    "۰":"0","۱":"1","۲":"2","۳":"3","۴":"4","۵":"5","۶":"6","۷":"7","۸":"8","۹":"9",
-})
+_ARABIC_DIGIT_MAP = str.maketrans(
+    {
+        "٠": "0",
+        "١": "1",
+        "٢": "2",
+        "٣": "3",
+        "٤": "4",
+        "٥": "5",
+        "٦": "6",
+        "٧": "7",
+        "٨": "8",
+        "٩": "9",
+        "۰": "0",
+        "۱": "1",
+        "۲": "2",
+        "۳": "3",
+        "۴": "4",
+        "۵": "5",
+        "۶": "6",
+        "۷": "7",
+        "۸": "8",
+        "۹": "9",
+    }
+)
 
 _ARABIC_NUMBER_WORDS = {
-    "واحد": 1, "واحدة": 1,
-    "اثنين": 2, "اثنان": 2, "اثنتين": 2, "اثنتان": 2,
-    "ثلاث": 3, "ثلاثة": 3,
-    "أربع": 4, "اربعة": 4, "أربعة": 4,
-    "خمس": 5, "خمسة": 5,
-    "ست": 6, "ستة": 6,
-    "سبع": 7, "سبعة": 7,
-    "ثمان": 8, "ثمانية": 8,
-    "تسع": 9, "تسعة": 9,
-    "عشر": 10, "عشرة": 10,
-    "عشرين": 20, "ثلاثين": 30, "أربعين": 40, "خمسين": 50,
-    "مئة": 100, "مائة": 100,
+    "واحد": 1,
+    "واحدة": 1,
+    "اثنين": 2,
+    "اثنان": 2,
+    "اثنتين": 2,
+    "اثنتان": 2,
+    "ثلاث": 3,
+    "ثلاثة": 3,
+    "أربع": 4,
+    "اربعة": 4,
+    "أربعة": 4,
+    "خمس": 5,
+    "خمسة": 5,
+    "ست": 6,
+    "ستة": 6,
+    "سبع": 7,
+    "سبعة": 7,
+    "ثمان": 8,
+    "ثمانية": 8,
+    "تسع": 9,
+    "تسعة": 9,
+    "عشر": 10,
+    "عشرة": 10,
+    "عشرين": 20,
+    "ثلاثين": 30,
+    "أربعين": 40,
+    "خمسين": 50,
+    "مئة": 100,
+    "مائة": 100,
 }
 
 _TOP_HINTS = ("top", "highest", "best", "أعلى", "اعلى", "الأعلى", "الاعلى", "أفضل", "الافضل", "الأفضل")
 _RANKING_OBJECTS = (
-    "مدن", "المدن", "مدينة", "cities", "city",
-    "عملاء", "العملاء", "customers", "customer",
-    "منتجات", "المنتجات", "products", "product",
-    "اصناف", "الأصناف", "items", "item",
+    "مدن",
+    "المدن",
+    "مدينة",
+    "cities",
+    "city",
+    "عملاء",
+    "العملاء",
+    "customers",
+    "customer",
+    "منتجات",
+    "المنتجات",
+    "products",
+    "product",
+    "اصناف",
+    "الأصناف",
+    "items",
+    "item",
 )
+
 
 def _infer_top_limit(question: str) -> Optional[int]:
     """Infer intended Top-N from text. Returns None if not a ranking query."""
@@ -183,6 +237,131 @@ def _infer_top_limit(question: str) -> Optional[int]:
     return None
 
 
+def _apply_heuristics(question: str, plan: Dict[str, Any], catalog: Optional[dict] = None) -> Dict[str, Any]:
+    """Post-process a plan (from LLM or rule-based) using lightweight heuristics.
+
+    Goals:
+    - Add month/quarter/year grouping when mentioned.
+    - Add discount metric when asked.
+    - Infer Top-N limit for ranking queries.
+    - Keep SAFE: only add keys that exist in the catalog.
+    """
+    catalog = catalog or {}
+
+    q_raw = (question or "").strip()
+    q = q_raw.lower()
+
+    plan = dict(plan or {})
+    plan.setdefault("metrics", [])
+    plan.setdefault("dimensions", [])
+    plan.setdefault("filters", [])
+    plan.setdefault("sort", [])
+    plan.setdefault("limit", DEFAULT_MAX_ROWS)
+
+    metrics_ok = _catalog_keys(catalog, "metrics")
+    dims_ok = _catalog_keys(catalog, "dimensions")
+
+    def add_dim(d: str) -> None:
+        if d in dims_ok and d not in (plan.get("dimensions") or []):
+            plan["dimensions"] = list(dict.fromkeys((plan.get("dimensions") or []) + [d]))
+
+    def add_metric(m: str) -> None:
+        if m in metrics_ok and m not in (plan.get("metrics") or []):
+            plan["metrics"] = list(dict.fromkeys((plan.get("metrics") or []) + [m]))
+
+    # -----------------------
+    # Time grouping heuristics
+    # -----------------------
+    if any(x in q_raw for x in ["شهري", "شهريا", "بالشهر", "شهريًا"]) or "monthly" in q:
+        add_dim("month_start")
+        plan["limit"] = min(int(plan.get("limit") or DEFAULT_MAX_ROWS), 60)
+
+    quarter_hit = (
+        any(x in q_raw for x in ["ربع", "بالربع", "ربع سنوي", "ربع سنوية", "ربعياً", "ربعيا"])
+        or any(x in q for x in ["quarter", "qtr", "quarterly"])
+    )
+    if quarter_hit:
+        add_dim("order_year")
+        add_dim("order_quarter")
+
+    yearly_hit = (
+        any(x in q_raw for x in ["سنة", "سنوي", "سنوياً", "سنويا", "بالسنة", "حسب السنة"])
+        or any(x in q for x in ["year", "annual", "yearly"])
+    )
+    if yearly_hit:
+        add_dim("order_year")
+
+    # -----------------------
+    # Metric intent heuristics
+    # -----------------------
+    net_hit = any(x in q_raw for x in ["صافي", "صافية"]) or "net" in q
+    gross_hit = ("إجمالي" in q_raw) and (not net_hit)
+    disc_hit = any(x in q_raw for x in ["خصم", "خصومات"]) or any(x in q for x in ["discount", "discounts"])
+
+    discount_metric = None
+    for cand in ["discount_amount", "discounts", "discount"]:
+        if cand in metrics_ok:
+            discount_metric = cand
+            break
+
+    if net_hit:
+        add_metric("net_sales")
+        if "net_sales" in metrics_ok:
+            plan["sort"] = [{"field": "net_sales", "dir": "desc"}]
+
+    if gross_hit:
+        add_metric("gross_sales")
+        if not plan.get("sort") and "gross_sales" in metrics_ok:
+            plan["sort"] = [{"field": "gross_sales", "dir": "desc"}]
+
+    if disc_hit and discount_metric:
+        add_metric(discount_metric)
+
+    compare_hit = ("قارن" in q_raw) or ("compare" in q)
+    if compare_hit:
+        ordered = []
+        for k in ["net_sales", discount_metric, "gross_sales", "gross_profit"]:
+            if k and k in (plan.get("metrics") or []) and k not in ordered:
+                ordered.append(k)
+        for k in plan.get("metrics") or []:
+            if k not in ordered:
+                ordered.append(k)
+        plan["metrics"] = ordered or (plan.get("metrics") or [])
+
+    # -----------------------
+    # City mapping heuristics
+    # -----------------------
+    city_map = {
+        "سيدني": "Sydney",
+        "سيدنى": "Sydney",
+        "sydney": "Sydney",
+        "ملبورن": "Melbourne",
+        "ميلبورن": "Melbourne",
+        "melbourne": "Melbourne",
+    }
+    city_val = None
+    for k, v in city_map.items():
+        if k in q:
+            city_val = v
+            break
+
+    if city_val and "city" in dims_ok:
+        filters = plan.get("filters") or []
+        if not any(isinstance(f, dict) and f.get("field") == "city" for f in filters):
+            filters.append({"field": "city", "op": "=", "value": city_val})
+        plan["filters"] = filters
+        add_dim("city")
+
+    # -----------------------
+    # Top-N inference
+    # -----------------------
+    top_n = _infer_top_limit(question or "")
+    if top_n is not None:
+        plan["limit"] = min(5000, max(1, int(top_n)))
+
+    return plan
+
+
 def _rule_based_plan(question: str, catalog: dict) -> Dict[str, Any]:
     """Very simple fallback that works offline."""
     q = (question or "").strip()
@@ -200,60 +379,97 @@ def _rule_based_plan(question: str, catalog: dict) -> Dict[str, Any]:
         "notes": "rule_based",
     }
 
-    # pick metric
-    if ("صافي" in q or "صافية" in q or "net" in ql) and "net_sales" in metrics_ok:
-        plan["metrics"] = ["net_sales"]
-        plan["sort"] = [{"field": "net_sales", "dir": "desc"}]
-    elif "إجمالي" in q and "gross_sales" in metrics_ok:
-        plan["metrics"] = ["gross_sales"]
-        plan["sort"] = [{"field": "gross_sales", "dir": "desc"}]
-    elif "gross_profit" in metrics_ok and "ربح" in q:
-        plan["metrics"] = ["gross_profit"]
-        plan["sort"] = [{"field": "gross_profit", "dir": "desc"}]
-    else:
-        # safe default
-        default_metric = "net_sales" if "net_sales" in metrics_ok else (next(iter(metrics_ok), None))
-        if default_metric:
-            plan["metrics"] = [default_metric]
-            plan["sort"] = [{"field": default_metric, "dir": "desc"}]
-    # discounts / compare (Phase 3 v4)
-    disc_hit = any(x in q for x in ["خصم", "خصومات"]) or any(x in ql for x in ["discount", "discounts"])
-    discount_metric = None
-    for cand in ["discount_amount", "discounts", "discount"]:
-        if cand in metrics_ok:
-            discount_metric = cand
-            break
+    # -----------------------------------------------------------------
+    # NEW: order_count (عدد الطلبات) — أعلى أولوية لو كان السؤال واضح
+    # -----------------------------------------------------------------
+    count_hit = any(x in q for x in ["عدد", "كم", "العدد"]) or any(x in ql for x in ["count", "how many", "number of"])
+    order_hit = any(x in q for x in ["طلب", "طلبات", "الطلبات"]) or any(x in ql for x in ["order", "orders"])
 
-    compare_hit = ("قارن" in q) or ("compare" in ql)
+    order_count_selected = False
+    if (("عدد الطلبات" in q) or (count_hit and order_hit)) and "order_count" in metrics_ok:
+        plan["metrics"] = ["order_count"]
+        plan["sort"] = [{"field": "order_count", "dir": "desc"}]
+        order_count_selected = True
 
-    if disc_hit and discount_metric:
-        if compare_hit and "net_sales" in (plan.get("metrics") or []):
-            plan["metrics"] = list(dict.fromkeys((plan.get("metrics") or []) + [discount_metric]))
-            # keep sorting by net_sales
-            plan["sort"] = [{"field": "net_sales", "dir": "desc"}] if "net_sales" in metrics_ok else (plan.get("sort") or [])
+    # pick metric (existing logic) — only if not order_count
+    if not order_count_selected:
+        if ("صافي" in q or "صافية" in q or "net" in ql) and "net_sales" in metrics_ok:
+            plan["metrics"] = ["net_sales"]
+            plan["sort"] = [{"field": "net_sales", "dir": "desc"}]
+        elif "إجمالي" in q and "gross_sales" in metrics_ok:
+            plan["metrics"] = ["gross_sales"]
+            plan["sort"] = [{"field": "gross_sales", "dir": "desc"}]
+        elif "gross_profit" in metrics_ok and "ربح" in q:
+            plan["metrics"] = ["gross_profit"]
+            plan["sort"] = [{"field": "gross_profit", "dir": "desc"}]
         else:
-            plan["metrics"] = [discount_metric]
-            plan["sort"] = [{"field": discount_metric, "dir": "desc"}]
+            # safe default
+            default_metric = "net_sales" if "net_sales" in metrics_ok else (next(iter(metrics_ok), None))
+            if default_metric:
+                plan["metrics"] = [default_metric]
+                plan["sort"] = [{"field": default_metric, "dir": "desc"}]
 
+        # discounts / compare (Phase 3 v4) — keep existing behavior
+        disc_hit = any(x in q for x in ["خصم", "خصومات"]) or any(x in ql for x in ["discount", "discounts"])
+        discount_metric = None
+        for cand in ["discount_amount", "discounts", "discount"]:
+            if cand in metrics_ok:
+                discount_metric = cand
+                break
+
+        compare_hit = ("قارن" in q) or ("compare" in ql)
+
+        if disc_hit and discount_metric:
+            if compare_hit and "net_sales" in (plan.get("metrics") or []):
+                plan["metrics"] = list(dict.fromkeys((plan.get("metrics") or []) + [discount_metric]))
+                # keep sorting by net_sales
+                plan["sort"] = [{"field": "net_sales", "dir": "desc"}] if "net_sales" in metrics_ok else (plan.get("sort") or [])
+            else:
+                plan["metrics"] = [discount_metric]
+                plan["sort"] = [{"field": discount_metric, "dir": "desc"}]
 
     # monthly
     if any(x in q for x in ["شهري", "شهريا", "بالشهر", "شهريًا"]) and "month_start" in dims_ok:
         plan["dimensions"].append("month_start")
 
     # quarterly
-    if any(x in q for x in ["ربع", "بالربع", "ربع سنوي", "ربع سنوية", "ربعياً", "ربعيا"]) or any(x in ql for x in ["quarter", "qtr", "quarterly"]):
+    if any(x in q for x in ["ربع", "بالربع", "ربع سنوي", "ربع سنوية", "ربعياً", "ربعيا"]) or any(
+        x in ql for x in ["quarter", "qtr", "quarterly"]
+    ):
         if "order_year" in dims_ok:
             plan["dimensions"].append("order_year")
         if "order_quarter" in dims_ok:
             plan["dimensions"].append("order_quarter")
 
+    # yearly
+    if any(x in q for x in ["سنة", "سنوي", "سنوياً", "سنويا", "بالسنة", "حسب السنة"]) or any(
+        x in ql for x in ["year", "annual", "yearly"]
+    ):
+        if "order_year" in dims_ok:
+            plan["dimensions"].append("order_year")
 
     # basic "by" logic (city / cities / مدن)
-    if (
-        any(x in q for x in ["مدينة", "مدن", "المدن"])
-        or any(x in ql for x in ["city", "cities"])
-    ) and "city" in dims_ok:
+    if (any(x in q for x in ["مدينة", "مدن", "المدن"]) or any(x in ql for x in ["city", "cities"])) and "city" in dims_ok:
         plan["dimensions"].append("city")
+
+    # products / categories (rule-based dimension selection)
+    cat_hit = any(x in q for x in ["فئة المنتج", "تصنيف المنتج", "قسم المنتج"]) or any(
+        x in ql for x in ["product category", "category", "segment"]
+    )
+    if cat_hit and "product_category" in dims_ok:
+        plan["dimensions"].append("product_category")
+    else:
+        prod_hit = any(
+            x in q for x in ["منتج", "منتجات", "المنتجات", "صنف", "أصناف", "اصناف", "الأصناف", "سلعة", "سلع"]
+        ) or any(x in ql for x in ["product", "products", "product name", "item", "items", "sku"])
+        if prod_hit and "product_name" in dims_ok:
+            plan["dimensions"].append("product_name")
+
+    cont_hit = any(x in q for x in ["عبوة", "تغليف", "حاوية", "نوع العبوة", "نوع التغليف"]) or any(
+        x in ql for x in ["container", "packaging", "pack"]
+    )
+    if cont_hit and "product_container" in dims_ok:
+        plan["dimensions"].append("product_container")
 
     # city mapping
     city_map = {
@@ -270,6 +486,10 @@ def _rule_based_plan(question: str, catalog: dict) -> Dict[str, Any]:
                     plan["dimensions"].append("city")
                 break
 
+    # state / province (dimension selection)
+    if (any(x in q for x in ["ولاية", "الولاية", "محافظة", "المحافظة"]) or any(x in ql for x in ["state", "states", "province"])) and "state" in dims_ok:
+        plan["dimensions"].append("state")
+
     # Top-N
     top_n = _infer_top_limit(question)
     if top_n is not None:
@@ -278,6 +498,7 @@ def _rule_based_plan(question: str, catalog: dict) -> Dict[str, Any]:
     # dedupe dimensions
     plan["dimensions"] = list(dict.fromkeys(plan["dimensions"]))
     return plan
+
 
 
 # -----------------------------------------------------------------------------

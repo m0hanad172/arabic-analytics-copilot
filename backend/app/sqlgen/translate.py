@@ -2,7 +2,7 @@
 import re
 import unicodedata
 
-TRANSLATOR_VERSION = "v2.9-groupby-shipping"
+TRANSLATOR_VERSION = "v2.10-ordercount"
 
 def _strip_invisible(s: str) -> str:
     return "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
@@ -59,6 +59,10 @@ def _pick_monthly_view(catalog: Dict[str, List[Dict[str, Any]]]) -> Optional[str
     return None
 
 def _detect_metric(q_norm: str) -> str:
+    # NEW: order_count intent
+    if any(x in q_norm for x in ["عدد الطلبات", "عدد الطلب", "عدد طلبات"]) or any(x in q_norm for x in ["order count", "orders count", "number of orders"]):
+        return "order_count"
+
     if "بعد الشحن" in q_norm:
         return "profit_after_shipping"
     if "شحن" in q_norm or "توصيل" in q_norm:
@@ -85,8 +89,9 @@ def translate_arabic_to_sql(question: str, catalog: Dict[str, List[Dict[str, Any
         return None, f"Catalog is empty [{TRANSLATOR_VERSION}]"
 
     year, month = _extract_year_month(q_norm)
+    metric = _detect_metric(q_norm)
 
-    # ---------- TOP N (Products / Categories / Cities / States / Account Managers / Ship Modes) ----------
+    # ---------- TOP N ----------
     top_n = re.search(r"(افضل|اعلى|top)\s*(\d+)", q_norm)
     n = _cap_n(int(top_n.group(2))) if top_n else None
 
@@ -112,9 +117,52 @@ LIMIT {n_}
 """.strip()
         return sql
 
+    # NEW: Top-N by order_count (safe = COUNT(*))
+    def _topn_fact_order_count(dim_col: str, n_: int, where: str):
+        sql = f"""
+SELECT
+  {dim_col} AS dim,
+  COUNT(*)::bigint AS order_count,
+  SUM(order_total)::numeric AS net_sales,
+  COUNT(*)::bigint AS line_count
+FROM bi.fact_sales_line
+{where}
+GROUP BY 1
+ORDER BY order_count DESC NULLS LAST
+LIMIT {n_}
+""".strip()
+        return sql
+
     if has_fact and n is not None:
         where = _where_year_month(year, month)
 
+        # NEW: count intent first (no behavior change for sales)
+        if metric == "order_count":
+            if re.search(r"(منتج|منتجات)", q_norm):
+                sql = _topn_fact_order_count("product_name", n, where)
+                return sql, f"Top {n} products by order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
+            if re.search(r"(فئه|فئة|فئات|الفئات|تصنيف)", q_norm):
+                sql = _topn_fact_order_count("product_category", n, where)
+                return sql, f"Top {n} categories by order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
+            if re.search(r"(مدينه|مدينة|المدن|مدينة)", q_norm):
+                sql = _topn_fact_order_count("city", n, where)
+                return sql, f"Top {n} cities by order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
+            if re.search(r"(ولايه|ولاية|الولايات|منطقه|منطقة)", q_norm):
+                sql = _topn_fact_order_count("state", n, where)
+                return sql, f"Top {n} states by order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
+            if re.search(r"(مدير الحساب|account manager|المسؤول)", q_norm):
+                sql = _topn_fact_order_count("account_manager", n, where)
+                return sql, f"Top {n} account managers by order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
+            if re.search(r"(طريقة الشحن|نوع الشحن|ship mode)", q_norm):
+                sql = _topn_fact_order_count("ship_mode", n, where)
+                return sql, f"Top {n} ship modes by order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
+        # existing behavior (sales)
         if re.search(r"(منتج|منتجات)", q_norm):
             sql = f"""
 SELECT
@@ -156,7 +204,7 @@ LIMIT {n}
             sql = _topn_fact("ship_mode", n, where)
             return sql, f"Top {n} ship modes from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
-    # ---------- GROUP BY (Sales by City/State/Category/ShipMode/AccountManager/CustomerType) ----------
+    # ---------- GROUP BY ----------
     if has_fact and ("حسب" in q_norm or "بحسب" in q_norm or "وفق" in q_norm):
         dim_map = [
             ("city", ["حسب المدينة", "حسب مدينه", "بالمدينة", "بالمدينه", "المدينة", "مدينه", "مدينة"]),
@@ -175,6 +223,23 @@ LIMIT {n}
 
         if dim_col:
             where = _where_year_month(year, month)
+
+            # NEW: count intent (order_count)
+            if metric == "order_count":
+                sql = f"""
+SELECT
+  {dim_col},
+  COUNT(*)::bigint AS order_count,
+  SUM(order_total)::numeric AS net_sales,
+  COUNT(*)::bigint AS line_count
+FROM bi.fact_sales_line
+{where}
+GROUP BY 1
+ORDER BY order_count DESC NULLS LAST
+LIMIT {int(max_rows)}
+""".strip()
+                return sql, f"Group-by order_count on '{dim_col}' (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
             sql = f"""
 SELECT
   {dim_col},
@@ -194,10 +259,9 @@ LIMIT {int(max_rows)}
 """.strip()
             return sql, f"Group-by sales on '{dim_col}' (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
-    # ---------- SHIPPING DELAY (Avg delay by ship mode, optionally filtered by year/month) ----------
+    # ---------- SHIPPING DELAY ----------
     if has_fact and ("تاخير" in q_norm or "تأخير" in q_norm) and ("شحن" in q_norm or "ship" in q_norm):
         where = _where_year_month(year, month)
-        # default: by ship_mode
         sql = f"""
 SELECT
   ship_mode,
@@ -212,24 +276,28 @@ LIMIT {int(max_rows)}
 """.strip()
         return sql, f"Avg shipping delay by ship_mode (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
-    # ---------- MONTHLY KPI (with optional year/month filter) ----------
+    # ---------- MONTHLY KPI ----------
     if ("شهر" in q_norm or "شهري" in q_norm or "monthly" in q_norm) and any(k in q_norm for k in ["مبيعات","صافي","اجمالي","خصم","ربح","شحن","بعد الشحن"]):
         mv = _pick_monthly_view(catalog)
         if mv:
-            metric = _detect_metric(q_norm)
+            metric2 = _detect_metric(q_norm)
             base_cols = ["order_year","order_month","month_start"]
-            if metric == "all":
+            if metric2 == "all":
                 cols = base_cols + ["gross_sales","discounts","net_sales","cogs","gross_profit","shipping_cost","profit_after_shipping"]
             else:
-                cols = base_cols + [metric]
+                cols = base_cols + [metric2]
 
-            # Filter works because vw_sales_monthly has order_year/order_month
             where = _where_year_month(year, month)
             sql = f"SELECT {', '.join(cols)} FROM {mv}{where} ORDER BY month_start LIMIT {int(max_rows)}"
-            return sql, f"Monthly KPI template (metric={metric}, year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+            return sql, f"Monthly KPI template (metric={metric2}, year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
     # ---------- FALLBACK ----------
     if has_fact:
+        if metric == "order_count":
+            where = _where_year_month(year, month)
+            sql = f"SELECT COUNT(*)::bigint AS order_count FROM bi.fact_sales_line{where}"
+            return sql, f"Fallback order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+
         return f"SELECT * FROM bi.fact_sales_line LIMIT {int(max_rows)}", f"Fallback to fact_sales_line. [{TRANSLATOR_VERSION}]"
 
     first = sorted(catalog.keys())[0]
