@@ -55,7 +55,7 @@ from backend.app.services.ask.plan_core import (  # noqa: F401
     _ARABIC_DIGIT_MAP,
 )
 
-ASK_VERSION = "v4.7"
+ASK_VERSION = "v4"
 
 # -----------------------
 # ENV
