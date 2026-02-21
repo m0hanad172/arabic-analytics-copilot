@@ -1,4 +1,25 @@
-﻿from fastapi import FastAPI
+﻿"""FastAPI app entry.
+
+We load `.env` here *before* importing routers/services so modules that read
+environment variables at import-time (e.g. llm_client) see the correct values.
+
+This is non-breaking: if python-dotenv isn't installed or `.env` is missing,
+we continue using process environment variables.
+"""
+
+from pathlib import Path
+import os
+
+try:
+    from dotenv import load_dotenv
+
+    # backend/app/main.py -> backend/.env
+    _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+    load_dotenv(_ENV_PATH, override=False)
+except Exception:
+    pass
+
+from fastapi import FastAPI
 
 from backend.app.api.routes.health import router as health_router
 from backend.app.api.routes.schema import router as schema_router
@@ -9,7 +30,11 @@ from backend.app.api.routes.eval import router as eval_router
 from backend.app.api.routes.transcribe import router as transcribe_router
 
 from backend.app.services.stt.transcriber import _get_model
-import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"  # backend/.env
+load_dotenv(ENV_PATH, override=True)
 
 API_PREFIX = "/api"
 app = FastAPI(
@@ -17,7 +42,6 @@ app = FastAPI(
     version="0.1.0",
     description="Arabic -> SQL backend scaffold with Postgres semantic layer allowlist.",
 )
-
 
 
 @app.on_event("startup")

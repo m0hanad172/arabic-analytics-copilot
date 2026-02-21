@@ -172,6 +172,12 @@ function parseTimeKey(v: any): number | null {
   return null;
 }
 
+function truncateLabel(v: any, max = 16) {
+  const s = String(v ?? "");
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(1, max - 1)) + "…";
+}
+
 function inferSmartDefaults(args: {
   rows: any[];
   columns: string[];
@@ -218,6 +224,8 @@ function inferSmartDefaults(args: {
   };
 }
 
+const MISSING_GROUP_LABEL = "(missing)";
+
 function aggregate(
   rows: any[],
   xField: string,
@@ -227,13 +235,21 @@ function aggregate(
   topN: number,
   preferChronoX: boolean
 ) {
-  type Bucket = { x: any; g: any; count: number; sum: number; min: number; max: number };
+  type Bucket = { x: any; g: string | null; count: number; sum: number; min: number; max: number };
   const map = new Map<string, Bucket>();
+
+  const normGroup = (g: any): string | null => {
+    if (!groupField) return null;
+    if (g === null || g === undefined || String(g).trim() === "") return MISSING_GROUP_LABEL;
+    return String(g);
+  };
 
   for (const r of rows) {
     const x = r?.[xField];
-    const g = groupField ? r?.[groupField] : null;
-    const key = `${String(x)}||${String(g)}`;
+    const g = normGroup(r?.[groupField]);
+
+    // safer key (avoid collisions with "||")
+    const key = JSON.stringify([x, g]);
 
     let b = map.get(key);
     if (!b) {
@@ -264,25 +280,45 @@ function aggregate(
     return { x: b.x, group: b.g, value };
   });
 
-  const totals = new Map<string, number>();
-  for (const r of flat) totals.set(String(r.x), (totals.get(String(r.x)) ?? 0) + (r.value ?? 0));
+  // totals per X (to select TopN X categories)
+  const totalsX = new Map<string, number>();
+  for (const r of flat) totalsX.set(String(r.x), (totalsX.get(String(r.x)) ?? 0) + (r.value ?? 0));
 
-  // choose topX by totals desc, then order later depending on preferChronoX
-  const topX = Array.from(totals.entries())
+  const topX = Array.from(totalsX.entries())
     .sort((a, b) => b[1] - a[1])
     .slice(0, Math.max(1, topN))
     .map(([x]) => x);
 
   const filtered = flat.filter((r) => topX.includes(String(r.x)));
 
-  const series = Array.from(new Set(filtered.map((r) => String(r.group)))).filter((s) => s !== "null");
+  // totals per series (for stable legend/color ordering)
+  const totalsSeries = new Map<string, number>();
+  if (groupField) {
+    for (const r of filtered) {
+      const g = String(r.group ?? MISSING_GROUP_LABEL);
+      totalsSeries.set(g, (totalsSeries.get(g) ?? 0) + (r.value ?? 0));
+    }
+  }
 
+  const series = groupField
+    ? Array.from(totalsSeries.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([g]) => g)
+    : [];
+
+  // build recharts dataset
   const byX = new Map<string, any>();
   for (const r of filtered) {
     const k = String(r.x);
     const obj = byX.get(k) ?? { x: r.x };
-    if (r.group === null || r.group === undefined) obj.value = r.value;
-    else obj[String(r.group)] = r.value;
+
+    if (!groupField) {
+      obj.value = r.value;
+    } else {
+      const g = String(r.group ?? MISSING_GROUP_LABEL);
+      obj[g] = r.value;
+    }
+
     byX.set(k, obj);
   }
 
@@ -302,13 +338,22 @@ function aggregate(
       })
       .map(({ __tk, ...rest }) => rest);
   } else {
-    // keep top totals order
     const order = new Map<string, number>();
     topX.forEach((k, i) => order.set(String(k), i));
     data.sort((a, b) => (order.get(String(a.x)) ?? 1e9) - (order.get(String(b.x)) ?? 1e9));
   }
 
-  return { data, series };
+  return { data, series, topXCount: topX.length };
+}
+
+function getBodyBg(): string {
+  try {
+    const cssVar = getComputedStyle(document.documentElement).getPropertyValue("--bs-body-bg").trim();
+    if (cssVar) return cssVar;
+  } catch {
+    // ignore
+  }
+  return "#0b0f14"; // fallback for dark
 }
 
 export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) {
@@ -357,9 +402,12 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
       topN: false,
     });
 
-    // if group exists, stacked bar is usually better (unless time-like X => line)
     const defaultChart: ChartType =
-      looksTimeLike(smartDefault.xField) ? "line" : (smartDefault.groupField ? "bar_stacked" : smartDefault.chartType);
+      looksTimeLike(smartDefault.xField)
+        ? "line"
+        : smartDefault.groupField
+          ? "bar_stacked"
+          : smartDefault.chartType;
 
     setChartType(defaultChart);
     setAggType(smartDefault.aggType);
@@ -415,9 +463,12 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
   useEffect(() => {
     if (!rows || rows.length === 0) return;
 
-    // prefer stacked when group exists and not time-like X
     const suggestedChart: ChartType =
-      looksTimeLike(smartDefault.xField) ? "line" : (smartDefault.groupField ? "bar_stacked" : smartDefault.chartType);
+      looksTimeLike(smartDefault.xField)
+        ? "line"
+        : smartDefault.groupField
+          ? "bar_stacked"
+          : smartDefault.chartType;
 
     if (!touched.chartType) setChartType(suggestedChart);
     if (!touched.xField) setXField(smartDefault.xField);
@@ -470,7 +521,7 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
     (aggType === "count" ? true : !!yField && numeric.includes(yField));
 
   const prepared = useMemo(() => {
-    if (!canRender) return { data: [], series: [] as string[] };
+    if (!canRender) return { data: [], series: [] as string[], topXCount: 0 };
     return aggregate(
       rows,
       xField,
@@ -489,7 +540,7 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
 
   return (
     <div className="viz-tab" dir="ltr">
-      <div className="d-flex flex-wrap gap-2 align-items-end mb-3">
+      <div className="d-flex flex-wrap gap-2 align-items-end mb-2">
         <div>
           <label className="form-label mb-1">Chart</label>
           <select
@@ -535,13 +586,17 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
               touch("yField");
               setYField(e.target.value);
             }}
-            disabled={aggType === "count"}
+            disabled={aggType === "count" || numeric.length === 0}
           >
-            {numeric.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
+            {numeric.length ? (
+              numeric.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))
+            ) : (
+              <option value="">(no numeric columns)</option>
+            )}
           </select>
         </div>
 
@@ -584,7 +639,7 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
           </select>
         </div>
 
-        <div style={{ width: 110 }}>
+        <div style={{ width: 120 }}>
           <label className="form-label mb-1">Top N</label>
           <input
             className="form-control form-control-sm"
@@ -603,66 +658,86 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
       {!rows.length ? (
         <div className="text-body-secondary">No rows to visualize.</div>
       ) : !canRender ? (
-        <div className="text-body-secondary">Pick X/Y (or use count) to render.</div>
+        <div className="text-body-secondary">
+          Pick X/Y (or use <code>count</code>) to render.
+        </div>
       ) : (
         <>
-          <div className="d-flex justify-content-end gap-2 mb-2">
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-secondary"
-              onClick={applyDefaultsSmart}
-              title="Reset to smart defaults"
-            >
-              <i className="bi bi-magic ms-2" />
-              Smart reset
-            </button>
+          <div className="d-flex justify-content-between align-items-center mb-2">
+            <div className="small text-secondary">
+              Points: <b>{prepared.data.length}</b>
+              {hasGroup ? (
+                <>
+                  {" "}
+                  | Series: <b>{prepared.series.length}</b>
+                </>
+              ) : null}
+              {" "}
+              | Showing top <b>{prepared.topXCount}</b> X categories
+            </div>
 
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-secondary"
-              onClick={() => {
-                safeLocalStorageRemove(storageKey);
-                applyDefaultsSmart();
-              }}
-              title="Clear saved settings for this query"
-            >
-              <i className="bi bi-eraser ms-2" />
-              Clear saved
-            </button>
+            <div className="d-flex gap-2">
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary"
+                onClick={applyDefaultsSmart}
+                title="Reset to smart defaults"
+              >
+                <i className="bi bi-magic ms-2" />
+                Smart reset
+              </button>
 
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-secondary"
-              onClick={() => {
-                safeLocalStorageClearPrefix(LS_PREFIX);
-                applyDefaultsSmart();
-              }}
-              title="Clear ALL saved chart settings"
-            >
-              <i className="bi bi-trash3 ms-2" />
-              Clear all
-            </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary"
+                onClick={() => {
+                  safeLocalStorageRemove(storageKey);
+                  applyDefaultsSmart();
+                }}
+                title="Clear saved settings for this query"
+              >
+                <i className="bi bi-eraser ms-2" />
+                Clear saved
+              </button>
 
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-secondary"
-              onClick={async () => {
-                if (!chartRef.current) return;
-                try {
-                  const dataUrl = await toPng(chartRef.current, { cacheBust: true, pixelRatio: 2 });
-                  const a = document.createElement("a");
-                  a.href = dataUrl;
-                  a.download = "aac_chart.png";
-                  a.click();
-                } catch {
-                  // ignore
-                }
-              }}
-              title="Export chart as PNG"
-            >
-              <i className="bi bi-download ms-2" />
-              Export PNG
-            </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary"
+                onClick={() => {
+                  safeLocalStorageClearPrefix(LS_PREFIX);
+                  applyDefaultsSmart();
+                }}
+                title="Clear ALL saved chart settings"
+              >
+                <i className="bi bi-trash3 ms-2" />
+                Clear all
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary"
+                onClick={async () => {
+                  if (!chartRef.current) return;
+                  try {
+                    const dataUrl = await toPng(chartRef.current, {
+                      cacheBust: true,
+                      pixelRatio: 2,
+                      backgroundColor: getBodyBg(),
+                    });
+                    const a = document.createElement("a");
+                    a.href = dataUrl;
+                    a.download = "aac_chart.png";
+                    a.click();
+                  } catch {
+                    // ignore
+                  }
+                }}
+                title="Export chart as PNG"
+              >
+                <i className="bi bi-download ms-2" />
+                Export PNG
+              </button>
+            </div>
           </div>
 
           <div className="border rounded p-2" ref={chartRef}>
@@ -670,9 +745,12 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
               {chartType === "line" ? (
                 <LineChart data={prepared.data}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="x" />
+                  <XAxis dataKey="x" tickFormatter={(v) => truncateLabel(v, 18)} />
                   <YAxis tickFormatter={yTickFormatter} />
-                  <Tooltip formatter={(v: any) => yTickFormatter(v)} />
+                  <Tooltip
+                    labelFormatter={(l) => String(l ?? "")}
+                    formatter={(v: any) => yTickFormatter(v)}
+                  />
                   <Legend />
                   {prepared.series.length ? (
                     prepared.series.map((s, i) => (
@@ -691,9 +769,12 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
               ) : (
                 <BarChart data={prepared.data}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="x" />
+                  <XAxis dataKey="x" tickFormatter={(v) => truncateLabel(v, 18)} />
                   <YAxis tickFormatter={yTickFormatter} />
-                  <Tooltip formatter={(v: any) => yTickFormatter(v)} />
+                  <Tooltip
+                    labelFormatter={(l) => String(l ?? "")}
+                    formatter={(v: any) => yTickFormatter(v)}
+                  />
                   <Legend />
                   {prepared.series.length ? (
                     prepared.series.map((s, i) => (

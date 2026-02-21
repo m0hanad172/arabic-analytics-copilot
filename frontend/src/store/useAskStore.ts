@@ -14,7 +14,20 @@ export type HistoryItem = {
   meta?: {
     used_llm?: boolean;
     used_cache?: boolean;
+
+    // legacy: DB/compile/exec time (does NOT include LLM)
     duration_ms?: number;
+
+    // ✅ new: total wall time (includes LLM + network)
+    total_ms?: number;
+
+    // ✅ LLM timing + status
+    llm_ms?: number;
+    llm_status?: string;
+    llm_error?: string;
+    llm_attempts?: number;
+    llm_model?: string;
+
     log_id?: number;
     ask_version?: string;
     plan_corrections?: string[];
@@ -44,6 +57,11 @@ type AskState = {
 
   runAsk: (question?: string, opts?: Partial<RunOpts>) => Promise<void>;
 };
+
+function asNum(v: any): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 export const useAskStore = create<AskState>()(
   persist(
@@ -93,16 +111,33 @@ export const useAskStore = create<AskState>()(
           set({ last: data, busy: false, error: undefined });
 
           const m: any = data?.meta ?? {};
+
+          const dbMs = asNum(m.duration_ms);
+          const llmMs = asNum(m.llm_ms);
+          // ✅ prefer backend total_ms; otherwise best-effort fallback
+          const totalMs =
+            asNum(m.total_ms) ??
+            (dbMs != null && llmMs != null ? dbMs + llmMs : dbMs);
+
           get().pushHistory({
             q,
             ts: Date.now(),
             req,
             meta: {
-              used_llm: m.used_llm,
-              used_cache: m.used_cache,
-              duration_ms: m.duration_ms,
-              log_id: m.log_id,
-              ask_version: m.ask_version,
+              used_llm: !!m.used_llm,
+              used_cache: !!m.used_cache,
+
+              duration_ms: dbMs,
+              total_ms: totalMs,
+
+              llm_ms: llmMs,
+              llm_status: typeof m.llm_status === "string" ? m.llm_status : undefined,
+              llm_error: typeof m.llm_error === "string" ? m.llm_error : undefined,
+              llm_attempts: asNum(m.llm_attempts),
+              llm_model: typeof m.llm_model === "string" ? m.llm_model : undefined,
+
+              log_id: asNum(m.log_id),
+              ask_version: typeof m.ask_version === "string" ? m.ask_version : undefined,
               plan_corrections: Array.isArray(m.plan_corrections) ? m.plan_corrections : undefined,
             },
           });

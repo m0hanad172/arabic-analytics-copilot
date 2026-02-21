@@ -1,0 +1,15 @@
+﻿fastapi>=0.110
+uvicorn[standard]>=0.27
+python-dotenv>=1.0
+pydantic>=2.6
+pydantic-settings>=2.2
+SQLAlchemy[asyncio]>=2.0
+asyncpg>=0.29
+sqlparse>=0.5
+geemap
+djitellopy
+python-multipart
+ipykernel
+pandas
+jupyter
+

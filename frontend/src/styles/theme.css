@@ -404,3 +404,21 @@ table td.text-end, table th.text-end {
   font-size: 13.5px;
   line-height: 1.5;
 }
+
+/* =========================
+   RTL helpers (Explain/Plan/Meta only)
+   ========================= */
+.aac-rtl {
+  direction: rtl;
+  text-align: right;
+  unicode-bidi: plaintext;
+}
+
+/* Keep code/json/sql islands LTR inside RTL blocks */
+.aac-rtl .aac-ltr,
+.aac-rtl pre,
+.aac-rtl code {
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: plaintext;
+}
