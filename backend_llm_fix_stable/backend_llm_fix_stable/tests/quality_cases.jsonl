@@ -1,2 +1,0 @@
-{"id":"q_001","question":"اعرض صافي المبيعات حسب المنطقة","expect_sql":["region"],"xfail_reason":"region column not present in bi.vw_fact_sales_line_clean"}
-{"id":"q_002","question":"اعرض صافي المبيعات حسب الدولة","expect_sql":["country"],"xfail_reason":"country column not present in bi.vw_fact_sales_line_clean"}
