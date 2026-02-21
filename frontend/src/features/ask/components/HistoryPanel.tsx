@@ -52,7 +52,7 @@ export function HistoryPanel() {
         onChange={(e) => setQ(e.target.value)}
       />
 
-      {/* ✅ Scroll area */}
+      {/* Scroll area */}
       <div className="aac-history-scroll vstack gap-2 flex-grow-1" style={{ minHeight: 0 }}>
         {top.length === 0 && <div className="text-secondary small">لا يوجد سجل.</div>}
 
@@ -63,7 +63,7 @@ export function HistoryPanel() {
           const usedLlm = !!m.used_llm;
           const usedCache = m.used_cache;
 
-          // ✅ show TOTAL if available, fallback to duration_ms
+          // show TOTAL if available, fallback to duration_ms
           const ms =
             typeof m.total_ms === "number"
               ? m.total_ms
