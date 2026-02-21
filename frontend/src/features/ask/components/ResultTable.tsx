@@ -251,11 +251,31 @@ export function ResultTable({ rows }: { rows: any[] }) {
   });
 
   // default sort: first numeric column desc
-  useEffect(() => {
-    if (sorting.length) return;
-    const firstNum = colKeys.find((k) => numericCols[k]);
-    if (firstNum) setSorting([{ id: firstNum, desc: true }]);
-  }, [colKeys, numericCols, sorting.length]);
+  const isTimeLikeCol = (k: string) =>
+  /(^|_)(year|quarter|month|day|date)$/i.test(k) ||
+  /^order_(year|quarter|month|day)$/i.test(k);
+
+useEffect(() => {
+  if (sorting.length) return;
+
+  const yearCol =
+    colKeys.find((k) => k === "order_year") ||
+    colKeys.find((k) => /(^|_)year$/i.test(k));
+
+  const metricCol = colKeys.find((k) => numericCols[k] && !isTimeLikeCol(k));
+
+  // إذا عندنا سنة + مقياس: خلي العرض طبيعي (زمني ثم مقياس)
+  if (yearCol && metricCol) {
+    setSorting([
+      { id: yearCol, desc: false },      // year ASC
+      { id: metricCol, desc: true },     // metric DESC داخل السنة
+    ]);
+    return;
+  }
+
+  // fallback: أول عمود رقمي غير زمني DESC
+  if (metricCol) setSorting([{ id: metricCol, desc: true }]);
+}, [colKeys, numericCols, sorting.length]);
 
   const filteredRowCount = table.getFilteredRowModel().rows.length;
   const totalRowCount = table.getCoreRowModel().rows.length;

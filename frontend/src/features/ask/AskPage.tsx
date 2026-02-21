@@ -8,6 +8,15 @@ import { MetaBadges } from "./components/MetaBadges";
 export function AskPage() {
   const { busy, error, last, runAsk } = useAskStore();
 
+  // If we have usable output (rows or SQL) then an LLM timeout/error is a soft failure
+  // because the backend can fall back to rule-based planning.
+  const hasOutput =
+    (last?.result?.rows?.length ?? 0) > 0 ||
+    (!!last?.result?.sql && last?.result?.sql !== "--");
+
+  // Only show a big warning if the LLM error prevented producing output.
+  const showHardLlmError = !!last?.meta?.llm_error && !hasOutput;
+
   const run = useCallback(() => {
     runAsk();
   }, [runAsk]);
@@ -33,7 +42,7 @@ export function AskPage() {
           </div>
         )}
 
-        {last?.meta?.llm_error && (
+        {showHardLlmError && (
           <div className="alert alert-warning mt-3 mb-0">
             <div className="fw-semibold mb-1">
               <i className="bi bi-exclamation-triangle" /> LLM Error

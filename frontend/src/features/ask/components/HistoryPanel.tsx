@@ -58,9 +58,24 @@ export function HistoryPanel() {
 
         {top.map((h: any, i: number) => {
           const m = h?.meta || {};
-          const usedLlm = m.used_llm;
+
+          // Only show the "LLM" badge when the LLM actually succeeded.
+          const usedLlm = !!m.used_llm;
           const usedCache = m.used_cache;
-          const ms = m.duration_ms;
+
+          // ✅ show TOTAL if available, fallback to duration_ms
+          const ms =
+            typeof m.total_ms === "number"
+              ? m.total_ms
+              : typeof m.duration_ms === "number"
+                ? m.duration_ms
+                : undefined;
+
+          const llmStatus = typeof m.llm_status === "string" ? m.llm_status : undefined;
+          const llmMs = typeof m.llm_ms === "number" ? m.llm_ms : undefined;
+
+          const llmOk = llmStatus === "ok" || llmStatus === "mock";
+          const llmTone = "text-bg-success";
 
           return (
             <div
@@ -98,15 +113,22 @@ export function HistoryPanel() {
                       {formatTime(h.ts)}
                     </span>
 
-                    {typeof ms === "number" && <span className="badge text-bg-secondary">{ms}ms</span>}
+                    {typeof ms === "number" && (
+                      <span className="badge text-bg-secondary">TOTAL {ms}ms</span>
+                    )}
 
                     {typeof usedCache === "boolean" && (
-                      <span className={`badge ${usedCache ? "text-bg-success" : "text-bg-secondary"}`}>Cache</span>
+                      <span className={`badge ${usedCache ? "text-bg-success" : "text-bg-secondary"}`}>
+                        Cache
+                      </span>
                     )}
 
-                    {typeof usedLlm === "boolean" && (
-                      <span className={`badge ${usedLlm ? "text-bg-success" : "text-bg-secondary"}`}>LLM</span>
-                    )}
+                    {/* LLM badge: show only on success */}
+                    {llmOk ? (
+                      <span className={`badge ${llmTone}`} title={typeof llmMs === "number" ? `LLM ${llmMs}ms` : undefined}>
+                        LLM
+                      </span>
+                    ) : null}
                   </div>
                 </div>
 

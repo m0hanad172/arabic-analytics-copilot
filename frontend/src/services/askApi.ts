@@ -13,6 +13,18 @@ function joinUrl(base: string, path: string): string {
   return `${b}/${p}`;
 }
 
+function envInt(name: string, fallback: number): number {
+  const raw = (import.meta as any)?.env?.[name];
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// default timeout (non-breaking): يمنع "pending" للأبد
+// - العادي: 20s
+// - مع LLM: 60s (لأن LLM ممكن يتأخر)
+const DEFAULT_TIMEOUT_MS = envInt("VITE_API_TIMEOUT_MS", 20_000);
+const DEFAULT_LLM_TIMEOUT_MS = envInt("VITE_API_LLM_TIMEOUT_MS", 60_000);
+
 const API_BASE = resolveApiBase();
 
 export async function ask(
@@ -27,17 +39,48 @@ export async function ask(
 
   const url = `${joinUrl(API_BASE, "ask")}?${qs.toString()}`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ question }),
-    signal,
-  });
+  // ✅ Timeout ذكي حسب use_llm
+  const timeoutMs = opts.use_llm ? DEFAULT_LLM_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${txt || res.statusText}`);
+  // نستخدم controller داخلي علشان نعمل timeout + نقدر ندمجه مع signal الخارجي
+  const controller = new AbortController();
+
+  let externalAbortHandler: (() => void) | null = null;
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    externalAbortHandler = () => controller.abort();
+    signal.addEventListener("abort", externalAbortHandler, { once: true });
   }
 
-  return (await res.json()) as AskResponse;
+  const t = window.setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ question }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${txt || res.statusText}`);
+    }
+
+    return (await res.json()) as AskResponse;
+  } catch (err: any) {
+    // ✅ رسالة واضحة للـ timeout بدل “AbortError” الغامضة
+    if (err?.name === "AbortError") {
+      const sec = Math.round(timeoutMs / 1000);
+      throw new Error(`Request timed out after ${sec}s`);
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(t);
+    if (signal && externalAbortHandler) {
+      signal.removeEventListener("abort", externalAbortHandler);
+    }
+  }
 }
