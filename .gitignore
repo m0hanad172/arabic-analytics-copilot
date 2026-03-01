@@ -6,3 +6,7 @@ frontend/.env.local
 model_cache/
 **/model_cache/
 
+
+model_cache/
+**/model_cache/
+
