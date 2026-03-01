@@ -2,3 +2,7 @@
 frontend/.env
 backend/.env.local
 frontend/.env.local
+
+model_cache/
+**/model_cache/
+
