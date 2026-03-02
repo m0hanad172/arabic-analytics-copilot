@@ -1,0 +1,16 @@
+﻿services:
+  db:
+    image: postgres:16
+    container_name: aac-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aac
+      POSTGRES_USER: aac
+      POSTGRES_PASSWORD: aac_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - aac_pgdata:/var/lib/postgresql/data
+
+volumes:
+  aac_pgdata:
