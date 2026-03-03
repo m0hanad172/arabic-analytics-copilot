@@ -27,6 +27,12 @@ model_cache/
 tools/archive/backups/
 tools/*.bak.*
 
+# Local git bundles (backup)
+*.bundle
+
+# Old one-off backups
+tools/archive/*.bak.*
+
 # ---- IMPORTANT ----
 # We DO commit the DB dump:
 # db/db_dump.sql is tracked in git on purpose.
