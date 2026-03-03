@@ -1,0 +1,2 @@
+$env:PYTHONPATH="."
+pytest -q
