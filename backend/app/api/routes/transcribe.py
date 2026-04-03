@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+from typing import Any
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 from backend.app.services.stt.transcriber import transcribe_file
@@ -57,7 +58,7 @@ async def transcribe(
 
         print(f"[STT] bytes={bytes_written} write_ms={write_ms:.0f} transcribe_ms={transcribe_ms:.0f} file={os.path.basename(tmp_path)}")
 
-        out = {"text": res.text, "language": res.language}
+        out: dict[str, Any] = {"text": res.text, "language": res.language}
         if debug:
             out["timings"] = {
                 "bytes": bytes_written,

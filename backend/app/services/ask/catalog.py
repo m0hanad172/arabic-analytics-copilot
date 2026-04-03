@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-# Extracted from services/ask/runner.py
-# Goal: keep runner.py smaller with no behavior change.
-
 def _augment_catalog(catalog: dict) -> dict:
     """Augment catalog with known safe keys that exist in bi.vw_fact_sales_line_clean.
 

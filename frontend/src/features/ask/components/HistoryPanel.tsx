@@ -1,4 +1,4 @@
-﻿// frontend/src/features/ask/components/HistoryPanel.tsx
+// frontend/src/features/ask/components/HistoryPanel.tsx
 import { useMemo, useState } from "react";
 import { useAskStore } from "../../../store/useAskStore";
 import { formatTime } from "../../../utils/time";

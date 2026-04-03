@@ -338,8 +338,11 @@ def _apply_heuristics(
     compare_hit = ("قارن" in q_raw) or ("compare" in q)
     if compare_hit:
         ordered = []
-        for k in ["net_sales", discount_metric, "gross_sales", "gross_profit"]:
-            if k and k in (plan.get("metrics") or []) and k not in ordered:
+        candidates = ["net_sales", "gross_sales", "gross_profit"]
+        if discount_metric:
+            candidates.insert(1, discount_metric)
+        for k in candidates:
+            if k in (plan.get("metrics") or []) and k not in ordered:
                 ordered.append(k)
         for k in plan.get("metrics") or []:
             if k not in ordered:

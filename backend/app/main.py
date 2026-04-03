@@ -1,13 +1,4 @@
-﻿"""FastAPI app entry.
-
-We load `.env` here *before* importing routers/services so modules that read
-environment variables at import-time (e.g. llm_client) see the correct values.
-
-This is non-breaking: if python-dotenv isn't installed or `.env` is missing,
-we continue using process environment variables.
-"""
-
-from pathlib import Path
+﻿from pathlib import Path
 import os
 
 try:

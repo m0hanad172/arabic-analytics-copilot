@@ -138,10 +138,10 @@ export function ResultTable({ rows }: { rows: any[] }) {
     return out;
   }, [data, colKeys]);
 
-  // ✅ NEW: row selection state
+  // NEW: row selection state
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
 
-  // ✅ NEW: selection column (checkbox)
+  // NEW: selection column (checkbox)
   const selectionCol = useMemo<ColumnDef<RowObj, unknown>>(
     () => ({
       id: "__select",
@@ -212,7 +212,7 @@ export function ResultTable({ rows }: { rows: any[] }) {
       return col;
     });
 
-    // ✅ prepend checkbox column without changing your columns logic
+    // prepend checkbox column without changing your columns logic
     return [selectionCol, ...dataCols];
   }, [colKeys, numericCols, selectionCol]);
 
@@ -286,7 +286,7 @@ useEffect(() => {
   const leafCols = table.getVisibleLeafColumns();
   const visibleCols = leafCols
     .map((c) => c.id)
-    // ✅ do not export the checkbox column
+    //  do not export the checkbox column
     .filter((id) => id !== "__select");
 
   const clearAllFilters = () => {
@@ -350,7 +350,7 @@ useEffect(() => {
             <div className="dropdown-menu p-2" style={{ minWidth: 260 }}>
               <div className="small text-secondary mb-2">Show / hide columns</div>
               {table.getAllLeafColumns().map((col) => {
-                // ✅ hide checkbox column from this menu
+                //  hide checkbox column from this menu
                 if (col.id === "__select") return null;
 
                 return (
@@ -413,7 +413,7 @@ useEffect(() => {
           <thead>
             <tr>
               {leafCols.map((col) => {
-                // ✅ special header for checkbox column (no sort/filter buttons)
+                // special header for checkbox column (no sort/filter buttons)
                 if (col.id === "__select") {
                   return (
                     <th
@@ -475,7 +475,7 @@ useEffect(() => {
                 {leafCols.map((col) => {
                   const id = col.id;
 
-                  // ✅ no filter cell for checkbox column
+                  // no filter cell for checkbox column
                   if (id === "__select") return <th key={id} />;
 
                   const isNum = !!numericCols[id];
@@ -532,7 +532,7 @@ useEffect(() => {
                 }}
               >
                 {leafCols.map((col) => {
-                  // ✅ checkbox cell
+                  // checkbox cell
                   if (col.id === "__select") {
                     return (
                       <td key={col.id} style={{ textAlign: "center", width: 42 }}>

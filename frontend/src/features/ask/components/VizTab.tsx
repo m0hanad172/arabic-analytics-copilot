@@ -609,6 +609,7 @@ export function VizTab(props: { rows: any[]; columns: string[]; sql?: string }) 
               touch("groupField");
               setGroupField(e.target.value);
             }}
+            title="Select a column to group by"
           >
             <option value="">(none)</option>
             {columns

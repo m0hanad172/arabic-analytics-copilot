@@ -67,7 +67,7 @@ def _get_model() -> WhisperModel:
     if _model is not None:
         return _model
 
-    # ✅ ندعم STT_* (الجديد) + WHISPER_* (القديم)
+    # ندعم STT_* (الجديد) + WHISPER_* (القديم)
     model_name = _env("STT_MODEL", "WHISPER_MODEL", default="small")
     device_pref = _env("STT_DEVICE", "WHISPER_DEVICE", default="auto").lower()
     compute_pref = _env("STT_COMPUTE_TYPE", "WHISPER_COMPUTE_TYPE", default="auto").lower()

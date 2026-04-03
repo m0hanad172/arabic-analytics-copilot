@@ -24,7 +24,7 @@ def _catalog_keys(catalog: dict, key: str) -> Set[str]:
                 if k:
                     out.add(k)
             elif isinstance(it, dict):
-                k = it.get("key") or it.get("name") or it.get("metric_key") or it.get("dim_key")
+                k = it.get("key") or it.get("name") or it.get("metric_key") or it.get("dim_key") or ""
                 if k:
                     out.add(str(k).strip())
     return out
@@ -129,26 +129,26 @@ def _validate_plan(plan: Dict[str, Any], catalog: dict) -> Dict[str, Any]:
 # --- Top-N parsing helpers (v3) ------------------------------------------------
 _ARABIC_DIGIT_MAP = str.maketrans(
     {
-        "٠": "0",
-        "١": "1",
-        "٢": "2",
-        "٣": "3",
-        "٤": "4",
-        "٥": "5",
-        "٦": "6",
-        "٧": "7",
-        "٨": "8",
-        "٩": "9",
-        "۰": "0",
-        "۱": "1",
-        "۲": "2",
-        "۳": "3",
-        "۴": "4",
-        "۵": "5",
-        "۶": "6",
-        "۷": "7",
-        "۸": "8",
-        "۹": "9",
+        "٠": ord("0"),
+        "١": ord("1"),
+        "٢": ord("2"),
+        "٣": ord("3"),
+        "٤": ord("4"),
+        "٥": ord("5"),
+        "٦": ord("6"),
+        "٧": ord("7"),
+        "٨": ord("8"),
+        "٩": ord("9"),
+        "۰": ord("0"),
+        "۱": ord("1"),
+        "۲": ord("2"),
+        "۳": ord("3"),
+        "۴": ord("4"),
+        "۵": ord("5"),
+        "۶": ord("6"),
+        "۷": ord("7"),
+        "۸": ord("8"),
+        "۹": ord("9"),
     }
 )
 
@@ -320,7 +320,10 @@ def _apply_heuristics(question: str, plan: Dict[str, Any], catalog: Optional[dic
     compare_hit = ("قارن" in q_raw) or ("compare" in q)
     if compare_hit:
         ordered = []
-        for k in ["net_sales", discount_metric, "gross_sales", "gross_profit"]:
+        candidates = ["net_sales", "gross_sales", "gross_profit"]
+        if discount_metric:
+            candidates.insert(1, discount_metric)
+        for k in candidates:
             if k and k in (plan.get("metrics") or []) and k not in ordered:
                 ordered.append(k)
         for k in plan.get("metrics") or []:
@@ -404,7 +407,7 @@ def _rule_based_plan(question: str, catalog: dict) -> Dict[str, Any]:
             plan["sort"] = [{"field": "gross_profit", "dir": "desc"}]
         else:
             # safe default
-            default_metric = "net_sales" if "net_sales" in metrics_ok else (next(iter(metrics_ok), None))
+            default_metric = "net_sales" if "net_sales" in metrics_ok else next(iter(metrics_ok), "")
             if default_metric:
                 plan["metrics"] = [default_metric]
                 plan["sort"] = [{"field": default_metric, "dir": "desc"}]

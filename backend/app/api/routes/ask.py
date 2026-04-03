@@ -9,8 +9,9 @@ from backend.app.services.ask import runner as ask_runner
 try:
     from backend.app.models.schemas import AskRequest  # type: ignore
 except Exception:
-    class AskRequest(BaseModel):
+    class AskRequestFallback(BaseModel):
         question: str
+    AskRequest = AskRequestFallback
 
 from backend.app.services.ask.runner import *  # noqa: F401,F403
 
@@ -25,7 +26,7 @@ async def ask_endpoint(
     debug_sql: int = Query(0),
     explain: int = Query(0),
 
-    # ✅ NEW
+
     llm_mode: str = Query("", description="LLM mode: '' (default) | 'mock'"),
 ):
     fn = ask_runner.ask
@@ -48,7 +49,7 @@ async def ask_endpoint(
     if "explain" in params:
         kwargs["explain"] = explain
 
-    # ✅ NEW
+
     if "llm_mode" in params:
         kwargs["llm_mode"] = llm_mode
 

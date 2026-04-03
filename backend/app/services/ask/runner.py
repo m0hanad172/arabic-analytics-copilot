@@ -1,15 +1,3 @@
-"""
-Arabic Analytics Copilot - ask runner (backward-compatible)
-
-Path:
-  backend/app/services/ask/runner.py
-
-Must keep old symbols for eval.py + tests:
-  _get_catalog, gclient,
-  _validate_plan, _normalize_plan, _rule_based_plan, _infer_top_limit, _apply_heuristics,
-  ALLOWED_OPS, _catalog_keys, _ARABIC_DIGIT_MAP
-"""
-
 from __future__ import annotations
 
 import os
@@ -17,11 +5,10 @@ import re
 import json
 import time
 import hashlib
-import asyncio
 from pathlib import Path
 from typing import Any, Optional, Dict, List, Tuple
 
-import asyncpg
+import asyncpg  # type: ignore[import-untyped]
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
@@ -38,12 +25,6 @@ from backend.app.services.ask.llm_client import (
     GEMINI_MODEL,
 )
 
-LLM_BACKOFF_SECONDS_QUOTA = int(os.getenv("LLM_BACKOFF_SECONDS_QUOTA", "30"))
-LLM_BACKOFF_SECONDS_TIMEOUT = int(os.getenv("LLM_BACKOFF_SECONDS_TIMEOUT", "3"))
-
-# -----------------------------
-# plan_core: source of truth
-# -----------------------------
 from backend.app.services.ask.plan_core import (  # noqa: F401
     _validate_plan,
     _normalize_plan,
@@ -54,6 +35,9 @@ from backend.app.services.ask.plan_core import (  # noqa: F401
     _catalog_keys,
     _ARABIC_DIGIT_MAP,
 )
+
+LLM_BACKOFF_SECONDS_QUOTA = int(os.getenv("LLM_BACKOFF_SECONDS_QUOTA", "30"))
+LLM_BACKOFF_SECONDS_TIMEOUT = int(os.getenv("LLM_BACKOFF_SECONDS_TIMEOUT", "3"))
 
 ASK_VERSION = "v4"
 
@@ -70,7 +54,7 @@ DEFAULT_MAX_ROWS = int(os.getenv("DEFAULT_MAX_ROWS", "200"))
 DEDUPE_SYNONYMS = os.getenv("DEDUPE_SYNONYMS", "0") in ("1", "true", "True", "yes", "YES")
 PLAN_AUTOCORRECT = os.getenv("PLAN_AUTOCORRECT", "1") in ("1", "true", "True", "yes", "YES")
 
-# ✅ Reduce prompt size to improve LLM latency (non-breaking)
+# Reduce prompt size to improve LLM latency (non-breaking)
 LLM_MAX_KEYS_IN_PROMPT = int(os.getenv("LLM_MAX_KEYS_IN_PROMPT", "60"))
 
 # -----------------------
@@ -81,7 +65,7 @@ LLM_ENABLED = _llm_enabled()
 LLM_BACKOFF_SECONDS = int(os.getenv("LLM_BACKOFF_SECONDS", "30"))
 _llm_disabled_until = 0.0
 
-# ✅ IMPORTANT: eval.py expects name `gclient` exactly
+# IMPORTANT: eval.py expects name `gclient` exactly
 gclient = None  # type: ignore
 
 
@@ -230,7 +214,7 @@ def _extract_json(text: str) -> Dict[str, Any]:
     t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\s*```$", "", t)
 
-    # ✅ find first JSON start
+    # find first JSON start
     i_obj = t.find("{")
     i_arr = t.find("[")
     starts = [i for i in (i_obj, i_arr) if i != -1]
@@ -252,7 +236,7 @@ def _extract_json(text: str) -> Dict[str, Any]:
     raise ValueError("JSON is not an object")
 
 # ---------------------------------------------------------------------
-# ✅ Top-N per year rewrite (non-breaking, only when explicitly asked)
+# Top-N per year rewrite (non-breaking, only when explicitly asked)
 # ---------------------------------------------------------------------
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -330,33 +314,33 @@ def _wrap_top_n_per_year(base_sql: str, n: int, entity_dim: str, metric: str, ha
 
     return f"""
 WITH base AS (
-  {core}
+{core}
 ),
 ranked AS (
-  SELECT
+SELECT
     order_year,
     {entity_dim} AS __entity,
     SUM(COALESCE({metric}, 0)) AS __rank_value,
     ROW_NUMBER() OVER (
-      PARTITION BY order_year
-      ORDER BY SUM(COALESCE({metric}, 0)) DESC
+    PARTITION BY order_year
+    ORDER BY SUM(COALESCE({metric}, 0)) DESC
     ) AS __rn
-  FROM base
-  GROUP BY order_year, {entity_dim}
+FROM base
+GROUP BY order_year, {entity_dim}
 )
 SELECT *
 FROM base
 WHERE (order_year, {entity_dim}) IN (
-  SELECT order_year, __entity
-  FROM ranked
-  WHERE __rn <= {int(n)}
+SELECT order_year, __entity
+FROM ranked
+WHERE __rn <= {int(n)}
 )
 ORDER BY order_year ASC{order_extra}, COALESCE({metric}, 0) DESC, {entity_dim} ASC
 """.strip()
 
 
 # ---------------------------------------------------------------------
-# ✅ Explain (rule-based, bilingual)
+# Explain (rule-based, bilingual)
 # ---------------------------------------------------------------------
 def _fmt_val(v: Any) -> str:
     if v is None:
@@ -389,6 +373,7 @@ def _fmt_fields_list(items: Any) -> str:
                 or it.get("name")
                 or it.get("metric_key")
                 or it.get("dim_key")
+                or ""
             )
             if s:
                 out.append(str(s).strip())
@@ -510,7 +495,7 @@ def _build_explain_obj(
 
 
 # ---------------------------------------------------------------------
-# ✅ BACKWARD-COMPAT: eval.py/tests expect `_get_catalog` from runner.py
+# BACKWARD-COMPAT: eval.py/tests expect `_get_catalog` from runner.py
 # ---------------------------------------------------------------------
 async def _get_catalog(schema: str = "bi") -> dict:
     cat, _src = await _get_catalog_with_source(schema)
@@ -560,7 +545,7 @@ async def ask(
     llm_mode: str = "",
 ) -> dict:
 
-    t_all = time.time()  # ✅ total wall time (includes LLM)
+    t_all = time.time()  # total wall time (includes LLM)
     question = getattr(body, "question", None) or ""
     if not str(question).strip():
         raise HTTPException(status_code=422, detail="question is required")
@@ -592,7 +577,7 @@ async def ask(
     llm_attempts: Optional[int] = None
     llm_status: Optional[str] = None
 
-        # ✅ Mock LLM mode: simulate "LLM success" without external calls (non-breaking)
+        # Mock LLM mode: simulate "LLM success" without external calls (non-breaking)
     if plan is None and use_llm and llm_mode_norm == "mock":
         llm_attempted = True
         used_llm = True
@@ -622,7 +607,7 @@ async def ask(
                 if g is None:
                     raise RuntimeError("Gemini client is None")
 
-                # ✅ Trim catalog keys in prompt to reduce latency (non-breaking)
+                # Trim catalog keys in prompt to reduce latency (non-breaking)
                 all_metrics = sorted(_catalog_keys(catalog, "metrics"))
                 all_dims = sorted(_catalog_keys(catalog, "dimensions"))
 
@@ -752,7 +737,7 @@ async def ask(
     compiled_sql_raw = str(compiled_sql)
     sql_for_guard = _strip_sql_terminator(compiled_sql_raw)
 
-    # ✅ Non-breaking: apply Top-N per year ONLY if explicitly requested
+    # Non-breaking: apply Top-N per year ONLY if explicitly requested
     top_per_year_n = _detect_top_per_year(str(question))
     top_per_year_applied = False
     if top_per_year_n:
@@ -786,7 +771,7 @@ async def ask(
     # Guardrails: default max_rows from plan.limit,
     # but for per-year we must allow more rows (N * years * maybe quarters)
     max_rows_guard = int(plan.get("limit") or DEFAULT_MAX_ROWS)
-    if top_per_year_applied:
+    if top_per_year_applied and top_per_year_n is not None:
         max_cap = int(os.getenv("MAX_ROWS_CAP", "5000"))
         max_rows_guard = min(max_cap, max(DEFAULT_MAX_ROWS, int(top_per_year_n) * 200))
 
@@ -799,8 +784,8 @@ async def ask(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"SQL blocked by guardrails: {e}")
 
-    # ✅ final normalization (kills ;; permanently)
-    # ✅ FINAL normalization: absolutely prevent ';;' (strong)
+    
+    #  FINAL normalization: absolutely prevent ';;' (strong)
     safe_sql = str(safe_sql).strip()
     safe_sql = re.sub(r"[;\s\u200e\u200f\u202a-\u202e]+$", "", safe_sql)  # remove ALL trailing ;/spaces/bidi
     safe_sql = _ensure_single_sql_terminator(safe_sql)
@@ -808,7 +793,7 @@ async def ask(
 
     rows = await _db_fetch(safe_sql)
     duration_ms = int((time.time() - t0) * 1000)  # compile+guard+db only
-    total_ms = int((time.time() - t_all) * 1000)  # ✅ includes LLM
+    total_ms = int((time.time() - t_all) * 1000)  # includes LLM
 
     warnings_exec: List[str] = []
     if _strip_sql_terminator(safe_sql) != _strip_sql_terminator(compiled_sql_raw):
@@ -869,7 +854,7 @@ async def ask(
             "llm_attempted": llm_attempted,
             "llm_error": llm_error,
             "duration_ms": duration_ms,   # legacy: db/compile time
-            "total_ms": total_ms,         # ✅ new: total wall time including LLM
+            "total_ms": total_ms,         # new: total wall time including LLM
             "llm_model": ("mock" if (use_llm and llm_mode_norm == "mock") else (GEMINI_MODEL if use_llm else None)),
             "llm_ms": llm_ms,
             "llm_status": llm_status,

@@ -16,7 +16,7 @@ export function Sidebar({ onCloseMobile }: { onCloseMobile: () => void }) {
         <SettingsPanel />
       </div>
 
-      {/* ✅ take remaining height */}
+      {/* take remaining height */}
       <div className="aac-card p-3 flex-grow-1 d-flex flex-column" style={{ minHeight: 0 }}>
         <HistoryPanel />
       </div>

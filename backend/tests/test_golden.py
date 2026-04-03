@@ -96,7 +96,7 @@ def test_golden_suite():
         min_rows = int(c.get("min_rows", 0))
         assert len(rows) >= min_rows, f"{c['id']}: rows={len(rows)} < {min_rows}"
 
-        # ✅ semicolon is allowed only as a trailing terminator
+        # semicolon is allowed only as a trailing terminator
         _assert_single_statement(sql_raw, c["id"])
 
         # SQL guardrails sanity (no destructive ops, etc.)
