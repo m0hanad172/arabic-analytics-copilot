@@ -329,6 +329,125 @@ With `DATABASE_BACKEND=sqlserver` and `COMPILER_BACKEND=python`:
 6. **`services/query_service.py`** off `utils/sql_safety.py` (deferred
    from Phase B).
 
+## Phase C3 Result
+
+**Goal:** ship SQL Server schema/seed scripts and a portable catalog
+loader so `ArabicAnalytics` can run with
+`DATABASE_BACKEND=sqlserver` + `COMPILER_BACKEND=python`. PostgreSQL
+behaviour is preserved (default `DATABASE_BACKEND=postgres`,
+`COMPILER_BACKEND=db`).
+
+See [docs/SQLSERVER_MIGRATION_PLAN.md](SQLSERVER_MIGRATION_PLAN.md)
+for the full audit, type-mapping table, and operator runbook.
+
+### What was added
+
+- **SQL Server schema/seed scripts** under
+  [backend/db/sqlserver/](../backend/db/sqlserver/):
+  - `001_create_database.sql` — creates `ArabicAnalytics` if absent.
+  - `002_create_schemas.sql` — creates `bi` and `bi_meta` schemas.
+  - `003_create_bi_objects.sql` — `bi.fact_sales_line` (28 columns,
+    mirroring the PG base table) + `bi.vw_fact_sales_line_clean` view
+    that aliases `order_date`/`ship_date` → `order_date_d`/`ship_date_d`
+    so the catalog/compiler can reference them unchanged.
+  - `004_create_bi_meta_objects.sql` — T-SQL versions of
+    `bi_meta.metrics`, `bi_meta.dimensions`, `bi_meta.synonyms`,
+    `bi_meta.plan_cache` (with unique index on `(question_norm, catalog_hash)`),
+    and `bi_meta.query_log` (jsonb → `NVARCHAR(MAX)`, defaults via
+    `SYSUTCDATETIME()`).
+  - `005_seed_bi_meta.sql` — idempotent `MERGE` upserts for the 13
+    metrics, 13 dimensions, and 54 synonyms exported from live PG,
+    translated to T-SQL (`COUNT_BIG(*)`, `DATEPART(...)`,
+    `DATEFROMPARTS(...)`, no `::cast`).
+  - `README.md` — SSMS + `sqlcmd` invocation order; what is *not*
+    shipped (data load).
+  - `_gen_seed.py` — generator used to produce `005_seed_bi_meta.sql`
+    from `docs/.bi_meta_export.json`. Build helper only; not executed
+    at runtime.
+- **Portable catalog loader** [backend/app/services/catalog_loader.py](../backend/app/services/catalog_loader.py):
+  - `load_sqlserver_catalog(schema)` — uses SQLAlchemy `AsyncSession`
+    to read `bi_meta.{metrics,dimensions,synonyms}` directly and
+    returns the same JSON shape as `bi_meta.get_catalog()`. No PG
+    syntax used.
+  - `load_catalog_for_active_backend(schema)` — dispatches to the
+    SQL Server loader when `is_sqlserver()`, otherwise delegates to the
+    pre-existing PG path (via `runner._db_fetchval`).
+  - `_build_catalog_dict(...)` — pure assembly, factored out so unit
+    tests do not need a SQLAlchemy session.
+- **Runner wiring** in
+  [services/ask/runner._get_catalog_with_source](../backend/app/services/ask/runner.py):
+  on SQL Server, calls `load_sqlserver_catalog(schema)` and tags the
+  catalog with `catalog_source="sqlserver_tables"`. PG path is
+  unchanged.
+- **`.env.example`** documents the exact local URL for
+  `MOHANADLENOVO\SQLEXPRESS` with both Driver 17 and Driver 18
+  alternatives, plus the `aioodbc` async variant.
+- **Documentation**:
+  - New `docs/SQLSERVER_MIGRATION_PLAN.md`.
+  - This file gains a *Phase C3 Result* section.
+  - `docs/PHASE_C_PLAN.md` marks C3 complete.
+
+### Date-dimension support
+
+The Python compiler's SQL Server path already lets through any
+expression that does not use `extract(...)` or `date_trunc(...)`. The
+Phase C3 seed therefore stores T-SQL date expressions
+(`DATEPART(year, f.order_date_d)`,
+`DATEFROMPARTS(YEAR(f.order_date_d), MONTH(f.order_date_d), 1)`) which
+compile cleanly. PostgreSQL output is unchanged (its dialect branch
+returns the catalog expression verbatim).
+
+Regression covered by
+[backend/tests/test_python_compiler.py:TestCompilerSqlServer.test_tsql_date_dimensions_pass_through](../backend/tests/test_python_compiler.py) — every C2 date dimension on PG now also works on SQL Server when seeded with T-SQL expressions.
+
+### PostgreSQL behaviour preserved
+
+- Default settings (`DATABASE_BACKEND=postgres`, `COMPILER_BACKEND=db`)
+  produce the same SQL through the same code paths as before Phase C3.
+- The catalog loader's PG branch still delegates to
+  `runner._db_fetchval("SELECT bi_meta.get_catalog($1)::jsonb;", ...)`.
+- Existing PG-backed tests (`test_golden`, `test_ask_standard`,
+  `test_quality_xfail`) still pass.
+- Full suite: 153 passed, 1 skipped, 1 xfailed (vs C2 baseline 135).
+
+### What you need to run manually in SSMS to create ArabicAnalytics
+
+```text
+1. Connect to MOHANADLENOVO\SQLEXPRESS with Windows authentication.
+2. Open and execute, in order:
+     backend/db/sqlserver/001_create_database.sql
+     backend/db/sqlserver/002_create_schemas.sql       (after switching to ArabicAnalytics)
+     backend/db/sqlserver/003_create_bi_objects.sql
+     backend/db/sqlserver/004_create_bi_meta_objects.sql
+     backend/db/sqlserver/005_seed_bi_meta.sql
+3. Load the fact table:
+     - Right-click ArabicAnalytics > Tasks > Import Flat File ...
+     - Source: data/clean/bi_ready_clean.csv (existing project export)
+     - Destination: bi.fact_sales_line
+   Or use bcp/SqlBulkCopy.
+4. In a project venv:
+     pip install aioodbc pyodbc
+5. Set in backend/.env (NOT in .env.example):
+     DATABASE_BACKEND=sqlserver
+     COMPILER_BACKEND=python
+     DATABASE_URL=mssql+pyodbc://@MOHANADLENOVO%5CSQLEXPRESS/ArabicAnalytics?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes&TrustServerCertificate=yes
+```
+
+### What remains for Phase C4
+
+1. Portable `plan_cache` upsert via the dialect (`MERGE` on T-SQL,
+   `INSERT ... ON CONFLICT` on PG) and the same for `query_log` insert
+   — so caching/logging stop being skipped on SQL Server.
+2. Data load script or documented `bcp`/SqlBulkCopy command for
+   `bi.fact_sales_line` (still manual today).
+3. Live SQL Server smoke test against `MOHANADLENOVO\SQLEXPRESS` (or a
+   containerised `mcr.microsoft.com/mssql/server:2022`).
+4. Migrate `services/query_service.py` off `utils/sql_safety.py`
+   (deferred from Phase B).
+5. Optional: port the remaining `bi.vw_*` analytical views
+   (`vw_sales_by_*`, `vw_sales_monthly`, `vw_shipping_kpis`) so they
+   are available on SQL Server too.
+
 ## Future phases (carried over from Phase A)
 
 Driver and connection abstraction.

@@ -485,6 +485,13 @@ async def _get_catalog(schema: str = "bi") -> dict:
 
 
 async def _get_catalog_with_source(schema: str = "bi") -> Tuple[dict, str]:
+    # Phase C3: on SQL Server, read bi_meta.{metrics,dimensions,synonyms}
+    # directly via SQLAlchemy. The PG path below is unchanged.
+    if is_sqlserver():
+        from backend.app.services.catalog_loader import load_sqlserver_catalog
+        cat = await load_sqlserver_catalog(schema)
+        return _augment_catalog(cat), "sqlserver_tables"
+
     if _load_catalog is not None:
         try:
             try:
