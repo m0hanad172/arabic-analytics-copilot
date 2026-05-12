@@ -2,7 +2,14 @@
 import re
 import unicodedata
 
-TRANSLATOR_VERSION = "v2.10-ordercount"
+from backend.app.db.dialects import SqlDialect, get_dialect
+
+TRANSLATOR_VERSION = "v2.11-dialect-ordercount"
+
+
+def _D(dialect: Optional[SqlDialect] = None) -> SqlDialect:
+    """Resolve the active dialect lazily so tests can inject one."""
+    return dialect if dialect is not None else get_dialect()
 
 def _strip_invisible(s: str) -> str:
     return "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
@@ -80,7 +87,17 @@ def _detect_metric(q_norm: str) -> str:
 def _cap_n(n: int, lo=1, hi=100) -> int:
     return max(lo, min(int(n), hi))
 
-def translate_arabic_to_sql(question: str, catalog: Dict[str, List[Dict[str, Any]]], max_rows: int):
+def translate_arabic_to_sql(
+    question: str,
+    catalog: Dict[str, List[Dict[str, Any]]],
+    max_rows: int,
+    dialect: Optional[SqlDialect] = None,
+):
+    D = _D(dialect)
+    cn = D.cast_numeric
+    bc = D.bigint_count()
+    nl = D.nulls_last("DESC")
+
     q_norm = _norm_ar(question or "")
 
     if not q_norm:
@@ -101,37 +118,35 @@ def translate_arabic_to_sql(question: str, catalog: Dict[str, List[Dict[str, Any
         sql = f"""
 SELECT
   {dim_col} AS dim,
-  SUM(order_total)::numeric AS net_sales,
-  SUM(sub_total)::numeric AS gross_sales,
-  SUM(discount_amount)::numeric AS discounts,
-  SUM(gross_profit)::numeric AS gross_profit,
-  SUM(profit_after_shipping)::numeric AS profit_after_shipping,
-  SUM(order_quantity)::numeric AS units,
-  COUNT(*)::bigint AS line_count
+  {cn('SUM(order_total)')} AS net_sales,
+  {cn('SUM(sub_total)')} AS gross_sales,
+  {cn('SUM(discount_amount)')} AS discounts,
+  {cn('SUM(gross_profit)')} AS gross_profit,
+  {cn('SUM(profit_after_shipping)')} AS profit_after_shipping,
+  {cn('SUM(order_quantity)')} AS units,
+  {bc} AS line_count
 FROM bi.fact_sales_line
 {where}
 GROUP BY 1
 HAVING SUM(order_total) IS NOT NULL
-ORDER BY net_sales DESC NULLS LAST
-LIMIT {n_}
+ORDER BY net_sales {nl}
 """.strip()
-        return sql
+        return D.apply_limit(sql, n_)
 
     # NEW: Top-N by order_count (safe = COUNT(*))
     def _topn_fact_order_count(dim_col: str, n_: int, where: str):
         sql = f"""
 SELECT
   {dim_col} AS dim,
-  COUNT(*)::bigint AS order_count,
-  SUM(order_total)::numeric AS net_sales,
-  COUNT(*)::bigint AS line_count
+  {bc} AS order_count,
+  {cn('SUM(order_total)')} AS net_sales,
+  {bc} AS line_count
 FROM bi.fact_sales_line
 {where}
 GROUP BY 1
-ORDER BY order_count DESC NULLS LAST
-LIMIT {n_}
+ORDER BY order_count {nl}
 """.strip()
-        return sql
+        return D.apply_limit(sql, n_)
 
     if has_fact and n is not None:
         where = _where_year_month(year, month)
@@ -168,21 +183,20 @@ LIMIT {n_}
 SELECT
   product_name,
   product_category,
-  SUM(order_total)::numeric AS net_sales,
-  SUM(sub_total)::numeric AS gross_sales,
-  SUM(discount_amount)::numeric AS discounts,
-  SUM(gross_profit)::numeric AS gross_profit,
-  SUM(profit_after_shipping)::numeric AS profit_after_shipping,
-  SUM(order_quantity)::numeric AS units,
-  COUNT(*)::bigint AS line_count
+  {cn('SUM(order_total)')} AS net_sales,
+  {cn('SUM(sub_total)')} AS gross_sales,
+  {cn('SUM(discount_amount)')} AS discounts,
+  {cn('SUM(gross_profit)')} AS gross_profit,
+  {cn('SUM(profit_after_shipping)')} AS profit_after_shipping,
+  {cn('SUM(order_quantity)')} AS units,
+  {bc} AS line_count
 FROM bi.fact_sales_line
 {where}
 GROUP BY 1,2
 HAVING SUM(order_total) IS NOT NULL
-ORDER BY net_sales DESC NULLS LAST
-LIMIT {n}
+ORDER BY net_sales {nl}
 """.strip()
-            return sql, f"Top {n} products from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+            return D.apply_limit(sql, n), f"Top {n} products from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
         if re.search(r"(فئه|فئة|فئات|الفئات|تصنيف)", q_norm):
             sql = _topn_fact("product_category", n, where)
@@ -229,35 +243,33 @@ LIMIT {n}
                 sql = f"""
 SELECT
   {dim_col},
-  COUNT(*)::bigint AS order_count,
-  SUM(order_total)::numeric AS net_sales,
-  COUNT(*)::bigint AS line_count
+  {bc} AS order_count,
+  {cn('SUM(order_total)')} AS net_sales,
+  {bc} AS line_count
 FROM bi.fact_sales_line
 {where}
 GROUP BY 1
-ORDER BY order_count DESC NULLS LAST
-LIMIT {int(max_rows)}
+ORDER BY order_count {nl}
 """.strip()
-                return sql, f"Group-by order_count on '{dim_col}' (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+                return D.apply_limit(sql, int(max_rows)), f"Group-by order_count on '{dim_col}' (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
             sql = f"""
 SELECT
   {dim_col},
-  SUM(order_total)::numeric AS net_sales,
-  SUM(sub_total)::numeric AS gross_sales,
-  SUM(discount_amount)::numeric AS discounts,
-  SUM(gross_profit)::numeric AS gross_profit,
-  SUM(profit_after_shipping)::numeric AS profit_after_shipping,
-  SUM(order_quantity)::numeric AS units,
-  COUNT(*)::bigint AS line_count
+  {cn('SUM(order_total)')} AS net_sales,
+  {cn('SUM(sub_total)')} AS gross_sales,
+  {cn('SUM(discount_amount)')} AS discounts,
+  {cn('SUM(gross_profit)')} AS gross_profit,
+  {cn('SUM(profit_after_shipping)')} AS profit_after_shipping,
+  {cn('SUM(order_quantity)')} AS units,
+  {bc} AS line_count
 FROM bi.fact_sales_line
 {where}
 GROUP BY 1
 HAVING SUM(order_total) IS NOT NULL
-ORDER BY net_sales DESC NULLS LAST
-LIMIT {int(max_rows)}
+ORDER BY net_sales {nl}
 """.strip()
-            return sql, f"Group-by sales on '{dim_col}' (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+            return D.apply_limit(sql, int(max_rows)), f"Group-by sales on '{dim_col}' (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
     # ---------- SHIPPING DELAY ----------
     if has_fact and ("تاخير" in q_norm or "تأخير" in q_norm) and ("شحن" in q_norm or "ship" in q_norm):
@@ -265,16 +277,15 @@ LIMIT {int(max_rows)}
         sql = f"""
 SELECT
   ship_mode,
-  AVG(ship_delay_days)::numeric AS avg_ship_delay_days,
-  COUNT(*)::bigint AS orders,
-  SUM(order_total)::numeric AS net_sales
+  {cn('AVG(ship_delay_days)')} AS avg_ship_delay_days,
+  {bc} AS orders,
+  {cn('SUM(order_total)')} AS net_sales
 FROM bi.fact_sales_line
 {where}
 GROUP BY 1
-ORDER BY avg_ship_delay_days DESC NULLS LAST
-LIMIT {int(max_rows)}
+ORDER BY avg_ship_delay_days {nl}
 """.strip()
-        return sql, f"Avg shipping delay by ship_mode (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+        return D.apply_limit(sql, int(max_rows)), f"Avg shipping delay by ship_mode (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
     # ---------- MONTHLY KPI ----------
     if ("شهر" in q_norm or "شهري" in q_norm or "monthly" in q_norm) and any(k in q_norm for k in ["مبيعات","صافي","اجمالي","خصم","ربح","شحن","بعد الشحن"]):
@@ -288,17 +299,18 @@ LIMIT {int(max_rows)}
                 cols = base_cols + [metric2]
 
             where = _where_year_month(year, month)
-            sql = f"SELECT {', '.join(cols)} FROM {mv}{where} ORDER BY month_start LIMIT {int(max_rows)}"
-            return sql, f"Monthly KPI template (metric={metric2}, year={year}, month={month}). [{TRANSLATOR_VERSION}]"
+            sql = f"SELECT {', '.join(cols)} FROM {mv}{where} ORDER BY month_start"
+            return D.apply_limit(sql, int(max_rows)), f"Monthly KPI template (metric={metric2}, year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
     # ---------- FALLBACK ----------
     if has_fact:
         if metric == "order_count":
             where = _where_year_month(year, month)
-            sql = f"SELECT COUNT(*)::bigint AS order_count FROM bi.fact_sales_line{where}"
+            # No row cap needed: aggregate returns a single row.
+            sql = f"SELECT {bc} AS order_count FROM bi.fact_sales_line{where}"
             return sql, f"Fallback order_count from fact (year={year}, month={month}). [{TRANSLATOR_VERSION}]"
 
-        return f"SELECT * FROM bi.fact_sales_line LIMIT {int(max_rows)}", f"Fallback to fact_sales_line. [{TRANSLATOR_VERSION}]"
+        return D.apply_limit("SELECT * FROM bi.fact_sales_line", int(max_rows)), f"Fallback to fact_sales_line. [{TRANSLATOR_VERSION}]"
 
     first = sorted(catalog.keys())[0]
-    return f"SELECT * FROM {first} LIMIT {int(max_rows)}", f"Fallback to {first}. [{TRANSLATOR_VERSION}]"
+    return D.apply_limit(f"SELECT * FROM {first}", int(max_rows)), f"Fallback to {first}. [{TRANSLATOR_VERSION}]"

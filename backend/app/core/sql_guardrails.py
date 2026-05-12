@@ -19,18 +19,21 @@ from dataclasses import dataclass
 from typing import Iterable, Set
 
 
-# Conservative deny-lists
+# Conservative deny-lists (cross-dialect; Postgres + SQL Server)
 _DENY_KEYWORDS = {
     "insert", "update", "delete", "merge",
     "drop", "alter", "create", "truncate",
     "grant", "revoke",
     "vacuum", "analyze",  # ANALYZE executes when used as command; we allow EXPLAIN (without ANALYZE)
-    "copy", "call", "execute", "do",
+    "copy", "call", "execute", "exec", "do",
     "set", "reset", "show", "listen", "notify",
     "lock",
+    # T-SQL specific
+    "use", "backup", "restore", "shutdown", "kill", "bulk",
 }
 
 _DENY_FUNCTIONS = {
+    # PostgreSQL
     "pg_sleep",
     "pg_read_file",
     "pg_write_file",
@@ -38,10 +41,22 @@ _DENY_FUNCTIONS = {
     "lo_import",
     "lo_export",
     "dblink",
+    # SQL Server
+    "xp_cmdshell",
+    "sp_executesql",
+    "openrowset",
+    "opendatasource",
+    "openquery",
+    "openxml",
 }
 
-# Schemas you almost never want exposed
-_DENY_SCHEMAS = {"pg_catalog", "information_schema", "pg_toast"}
+# Schemas you almost never want exposed (PG + SQL Server system schemas/dbs)
+_DENY_SCHEMAS = {
+    # Postgres
+    "pg_catalog", "information_schema", "pg_toast",
+    # SQL Server
+    "sys", "master", "msdb", "tempdb", "model",
+}
 
 
 @dataclass(frozen=True)
@@ -219,18 +234,29 @@ def _extract_schemas_from_from_join(sql_norm: str) -> Set[str]:
     return schemas
 
 
-def _enforce_limit_if_missing(sql: str, max_rows: int) -> str:
+def _enforce_limit_if_missing(sql: str, max_rows: int, dialect=None) -> str:
     """
-    If the SQL doesn't contain a LIMIT at all, append one.
-    This is intentionally simple (no heavy parsing).
+    If the SQL doesn't already constrain row count, apply one using the
+    active dialect (LIMIT n on Postgres, TOP (n) on SQL Server).
+    Intentionally simple (no heavy parsing).
     """
-    if re.search(r"\blimit\b", _normalize_for_scan(sql)):
+    norm = _normalize_for_scan(sql)
+    has_limit = bool(re.search(r"\blimit\s+\d+\b", norm))
+    has_top = bool(re.search(r"\bselect(\s+distinct)?\s+top\s*\(?\s*\d+", norm))
+    if has_limit or has_top:
         return sql
-    # Remove trailing semicolon before appending
+
+    if dialect is None:
+        # Lazy import to avoid cycles when guardrails are imported standalone.
+        from backend.app.db.dialects import get_dialect
+        dialect = get_dialect()
+
     core = sql.strip()
     if core.endswith(";"):
         core = core[:-1].rstrip()
-    return f"{core} LIMIT {max_rows};"
+    limited = dialect.apply_limit(core, max_rows)
+    # Guarantee exactly one trailing semicolon.
+    return f"{limited.rstrip().rstrip(';').rstrip()};"
 
 
 def guard_sql_or_raise(
@@ -239,6 +265,7 @@ def guard_sql_or_raise(
     max_rows: int = 200,
     allowed_schemas: Set[str] | None = None,
     allow_explain: bool | None = None,
+    dialect=None,
 ) -> str:
     """
     Validate debug_sql and return a safe SQL string (may append LIMIT).
@@ -287,5 +314,5 @@ def guard_sql_or_raise(
         if sch not in cfg.allowed_schemas:
             raise ValueError(f"Schema not allowed: {sch}.")
 
-    # Ensure LIMIT exists (or append one)
-    return _enforce_limit_if_missing(sql, max_rows_i)
+    # Ensure a row cap exists (LIMIT on Postgres, TOP (n) on SQL Server).
+    return _enforce_limit_if_missing(sql, max_rows_i, dialect=dialect)
