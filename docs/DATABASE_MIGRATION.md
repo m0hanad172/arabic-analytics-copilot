@@ -134,6 +134,105 @@ Exact next steps for Phase C:
    it, and exercises `/health`, `/schema`, `/query`, `/ask` (the last
    should return 501 until step 1 ships, then full pass).
 
+## Phase C1 Result
+
+**Goal:** stand up an in-process semantic compiler so Phase C2 can flip
+`/ask` to it on SQL Server without porting `bi_meta.compile_query` to
+T-SQL. PostgreSQL behaviour is untouched (default `COMPILER_BACKEND=db`).
+
+### Why a Python compiler instead of a T-SQL port
+
+See `docs/PHASE_C_PLAN.md` ("Why Python compiler instead of T-SQL port")
+and `docs/BI_META_AUDIT.md` ("What should move to Python") — the short
+version: a single Python implementation gives us one source of truth,
+keeps the database to just data, and emits dialect-correct SQL via the
+Phase A `SqlDialect` layer.
+
+### What was added
+
+- New configuration value `COMPILER_BACKEND` in
+  `backend/app/core/config.py` (default `db`). Allowed values: `db` (use
+  `bi_meta.compile_query` — current behaviour) and `python` (new
+  in-process compiler). Documented in `backend/.env.example`.
+- New package `backend/app/services/semantic/`:
+  - `errors.py` — typed exceptions: `CompilerError`,
+    `UnknownMetricError`, `UnknownDimensionError`,
+    `UnsupportedFilterOpError`, `InvalidFilterValueError`,
+    `EmptyPlanError`, `UnsupportedDimensionForBackend`.
+  - `models.py` — frozen dataclasses for `Metric`, `Dimension`, `Plan`,
+    `Filter`, `Sort`, plus `Plan.from_dict` for loose dict input.
+  - `catalog.py` — `Catalog.from_bi_meta(...)` adapts the JSON shape
+    produced by `bi_meta.get_catalog()` (or any equivalent dict).
+  - `compiler.py` — `compile_plan(plan, catalog, dialect=None) -> str`,
+    no DB connections inside; emits dialect-correct SQL with exactly
+    one trailing semicolon.
+- Documentation: `docs/BI_META_AUDIT.md` and `docs/PHASE_C_PLAN.md`.
+- Read-only introspection helper `backend/tests/_audit_bi_meta.py`
+  (used to capture the audit; not run by pytest).
+
+### Live PostgreSQL audit summary
+
+Captured against `arabic_analytics` on `127.0.0.1:5432`:
+
+- **Tables:** `bi_meta.{dimensions, metrics, synonyms, plan_cache, query_log}` (54 synonyms; 13 metrics; 13 dimensions).
+- **Views:** `bi_meta.{vw_plan_cache_recent, vw_plan_cache_stats, vw_query_log_recent}`.
+- **Functions:** `bi_meta.get_catalog()` and `bi_meta.get_catalog(text)` (sql), `bi_meta.compile_query(jsonb)` and `bi_meta.run_query(jsonb)` (plpgsql).
+- Full sources captured in `docs/BI_META_AUDIT.md` and `docs/.bi_meta_dump.txt`.
+
+### Subset supported by the Phase C1 compiler
+
+- `SELECT` of metrics + dimensions in plan order.
+- `FROM bi.vw_fact_sales_line_clean f` (or whatever `base_view` the catalog declares).
+- `WHERE 1=1` plus per-filter `AND ...` for `=`, `!=`, `>`, `>=`, `<`, `<=`, `ilike`, `between`, `in`. Empty `IN (...)` becomes `1=0` (mirrors PG).
+- `GROUP BY <dim_expression, ...>`.
+- `ORDER BY <field> <ASC|DESC>` (first sort entry that resolves to a known metric or dimension).
+- Limit clamping `[1, 5000]`, default 500 (verbatim mirror of `bi_meta.compile_query`).
+- Trailing row cap via `dialect.apply_limit` — `LIMIT n` on PostgreSQL, `TOP (n)` on SQL Server.
+- Metrics: every metric currently in the live `bi_meta.metrics` table (`net_sales`, `gross_sales`, `discount_amount`, `discounts`, `gross_profit`, `cogs`, `line_count`, `order_count`, `avg_ship_delay_days`, `avg_discount_pct`, `profit_after_shipping`, `shipping_cost`, `units`).
+- Dimensions on **PostgreSQL**: every dimension in the live catalog. On **SQL Server**: every dimension whose stored expression is portable (`f.<column>`). Date-bucket dimensions (`order_year`, `order_quarter`, `order_month`, `month_start`) are explicitly rejected with `UnsupportedDimensionForBackend` until Phase C2 adds T-SQL date expressions.
+
+### What still depends on PostgreSQL
+
+- `services/ask/runner.py` still uses asyncpg via the Phase B adapter
+  for the bi_meta cache/log path. Not changed in C1.
+- `services/ask/cache.py` still issues PostgreSQL `ON CONFLICT` SQL
+  against `bi_meta.plan_cache`. Phase C2.
+- `api/routes/eval.py`, `api/routes/logs.py` still call `bi_meta.*`
+  directly. Phase C2 will route them through the Python compiler /
+  portable SQL.
+- `services/catalog_cache.py` still calls `bi_meta.get_catalog()` to
+  load the JSON catalog. Phase C2 may replace with a direct
+  `SELECT * FROM bi_meta.metrics/dimensions/synonyms`.
+- The `bi_meta.compile_query` PostgreSQL function is still present in
+  the database; we have not dropped it.
+
+### Why SQL Server `/ask` still needs Phase C2
+
+`/ask` reads/writes `bi_meta.plan_cache`, `bi_meta.query_log`, and
+calls `bi_meta.compile_query`. Phase C1 only **adds** a Python
+compiler; it does not flip `/ask` to use it. SQL Server `/ask` therefore
+still returns the controlled HTTP 501 introduced in Phase B.
+
+### Exact next steps for Phase C2
+
+1. In `services/ask/runner.py`, when `COMPILER_BACKEND=python`:
+   - Load the catalog via `Catalog.from_bi_meta(...)`.
+   - Compile plans via `compile_plan(plan, catalog, dialect=get_dialect())`.
+   - Skip the `bi_meta.compile_query` round-trip.
+2. Replace `bi_meta.plan_cache` upsert (`ON CONFLICT`) with portable
+   SQL via the dialect (`MERGE` / check-then-insert on SQL Server,
+   keep `ON CONFLICT` on PostgreSQL).
+3. Replace `bi_meta.query_log` insert with portable SQL.
+4. Add T-SQL expressions for `order_year`, `order_quarter`,
+   `order_month`, `month_start` to the Python compiler.
+5. Migrate `services/catalog_cache.py` to read directly from
+   `bi_meta.metrics` / `bi_meta.dimensions` / `bi_meta.synonyms` (no
+   `get_catalog()` call required for SQL Server).
+6. Live SQL Server smoke test: boot
+   `mcr.microsoft.com/mssql/server:2022`, point `DATABASE_URL` at it,
+   exercise `/health`, `/schema`, `/query`, `/ask` (now expected to
+   succeed).
+
 ## Future phases (carried over from Phase A)
 
 Driver and connection abstraction.
