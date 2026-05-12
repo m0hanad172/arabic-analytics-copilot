@@ -271,6 +271,146 @@ FROM dbo.bi_ready_clean;
 parsed, which is what we want — the Phase C3 ALTER block already made
 every business column nullable.
 
+## Phase C4 live SQL Server smoke test
+
+**Date verified:** Phase C4 hotfix. Backend: `MOHANADLENOVO\SQLEXPRESS`,
+database `ArabicAnalytics`, drivers visible to pyodbc: Driver 18, Native
+Client 11.0, "SQL Server". Tested end-to-end with the in-process
+TestClient in `scripts/smoke_sqlserver_ask.py`.
+
+### Working SERVER pattern
+
+```
+DRIVER={ODBC Driver 18 for SQL Server}
+SERVER=.\SQLEXPRESS
+DATABASE=ArabicAnalytics
+Trusted_Connection=yes
+TrustServerCertificate=yes
+Encrypt=no
+```
+
+### Working DATABASE_URL
+
+```env
+DATABASE_BACKEND=sqlserver
+COMPILER_BACKEND=python
+DATABASE_URL=mssql+aioodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BSERVER%3D.%5CSQLEXPRESS%3BDATABASE%3DArabicAnalytics%3BTrusted_Connection%3Dyes%3BTrustServerCertificate%3Dyes%3BEncrypt%3Dno%3B
+```
+
+> **Why `odbc_connect=` instead of a normal netloc URL?** The named
+> instance "`.\SQLEXPRESS`" has a backslash. URL-encoding it as `%5C` in
+> the host part does not survive aioodbc's pyodbc bridge — the driver
+> receives a literal `.%5CSQLEXPRESS` and reports
+> `Named Pipes Provider: Could not open a connection ... [53]`.
+> `odbc_connect=<url-encoded ODBC string>` passes the raw connection
+> string through SQLAlchemy unchanged, which is the form SQLAlchemy's
+> own docs recommend for SQL Server.
+
+### Staging loader command
+
+```powershell
+$env:MSSQL_SERVER = ".\SQLEXPRESS"   # discovered by the probe
+python scripts/load_sqlserver_staging.py
+# -> Loaded 5000 rows into dbo.bi_ready_clean
+```
+
+### Transfer staging -> bi.fact_sales_line (corrected)
+
+INT-target columns must use a **two-step decimal-then-int cast** because
+pandas serialises ints-with-nulls as float strings like `'23.0'`, and
+`TRY_CONVERT(INT, '23.0')` returns NULL. The block below is the version
+that loaded 5000 rows with **0 unintended NULLs**:
+
+```sql
+USE ArabicAnalytics;
+TRUNCATE TABLE bi.fact_sales_line;
+INSERT INTO bi.fact_sales_line (
+    order_no, order_date, ship_date, ship_delay_days,
+    customer_type, account_manager, order_priority,
+    product_name, product_category, product_container, ship_mode,
+    city, state,
+    cost_price, retail_price, order_quantity,
+    sub_total, discount_pct, discount_amount, order_total,
+    shipping_cost, total, cogs, gross_profit, profit_after_shipping,
+    order_year, order_month, order_quarter
+)
+SELECT
+    NULLIF(order_no, ''),
+    TRY_CONVERT(DATE, NULLIF(order_date, '')),
+    TRY_CONVERT(DATE, NULLIF(ship_date, '')),
+    CAST(TRY_CONVERT(DECIMAL(38, 6), NULLIF(ship_delay_days, '')) AS INT),
+    NULLIF(customer_type, ''), NULLIF(account_manager, ''),
+    NULLIF(order_priority, ''),
+    NULLIF(product_name, ''), NULLIF(product_category, ''),
+    NULLIF(product_container, ''), NULLIF(ship_mode, ''),
+    NULLIF(city, ''), NULLIF(state, ''),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(cost_price, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(retail_price, '')),
+    CAST(TRY_CONVERT(DECIMAL(38, 6), NULLIF(order_quantity, '')) AS INT),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(sub_total, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(discount_pct, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(discount_amount, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(order_total, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(shipping_cost, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(total, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(cogs, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(gross_profit, '')),
+    TRY_CONVERT(DECIMAL(38, 6), NULLIF(profit_after_shipping, '')),
+    CAST(TRY_CONVERT(DECIMAL(38, 6), NULLIF(order_year, '')) AS INT),
+    CAST(TRY_CONVERT(DECIMAL(38, 6), NULLIF(order_month, '')) AS INT),
+    CAST(TRY_CONVERT(DECIMAL(38, 6), NULLIF(order_quarter, '')) AS INT);
+```
+
+### Known issue: order_quantity was NULL after the first transfer
+
+**Symptom:** every `bi.fact_sales_line.order_quantity` row was NULL even
+though the CSV had `4999 / 5000` non-null values.
+
+**Root cause:** the original transfer used `TRY_CONVERT(INT, NULLIF(order_quantity, ''))`.
+The staging cell stores `'23.0'` (pandas read the column as `float64`
+because one row is NaN, then pyodbc bound it as the text `'23.0'`).
+SQL Server's `TRY_CONVERT(INT, '23.0')` returns NULL because the
+literal contains a `.`.
+
+**Fix:** wrap with `CAST(TRY_CONVERT(DECIMAL(38, 6), ...) AS INT)` for
+every INT-target column. Doc above already uses this form.
+
+After the corrected re-run:
+- `SELECT COUNT(*) FROM bi.fact_sales_line` → 5 000.
+- `SELECT COUNT(*) FROM bi.fact_sales_line WHERE order_quantity IS NULL` → 1 (matches the single CSV row that was genuinely NaN).
+- `SELECT SUM(order_quantity) FROM bi.fact_sales_line` → 132 389.
+
+### Tested Arabic questions (POST /api/ask)
+
+All three returned HTTP 200, `meta.compiler_backend = "python"`,
+`meta.catalog_source = "sqlserver_tables"`, and
+`meta.skipped_for_sqlserver = ["query_log"]`. No asyncpg call, no
+`bi_meta.compile_query` call.
+
+| Question | Rows | Generated SQL |
+|---|---:|---|
+| اعرض عدد الطلبات حسب المدينة واعرض أعلى 5 | 2 | `SELECT TOP (5) f.city AS [city], COUNT_BIG(*) AS [order_count] FROM bi.vw_fact_sales_line_clean f WHERE 1=1 GROUP BY f.city ORDER BY [order_count] DESC;` |
+| اعرض المبيعات حسب السنة | 5 | `SELECT TOP (200) DATEPART(year, f.order_date_d) AS [order_year], CAST(SUM(f.order_total) AS NUMERIC(38, 6)) AS [net_sales] FROM bi.vw_fact_sales_line_clean f WHERE 1=1 GROUP BY DATEPART(year, f.order_date_d) ORDER BY [net_sales] DESC;` |
+| اعرض الربح حسب فئة المنتج | 3 | `SELECT TOP (200) f.product_category AS [product_category], CAST(SUM(f.gross_profit) AS NUMERIC(38, 6)) AS [gross_profit] FROM bi.vw_fact_sales_line_clean f WHERE 1=1 GROUP BY f.product_category ORDER BY [gross_profit] DESC;` |
+
+Sanity checks on the first response:
+- `result.rows[0]` → `{"city": "Sydney", "order_count": 3584}`
+- No `LIMIT`, `::bigint`, `::numeric`, `ILIKE`, `jsonb` anywhere in any
+  emitted SQL.
+
+### Reproducing the live smoke
+
+```powershell
+pip install aioodbc pyodbc
+$env:PYTHONIOENCODING = "utf-8"
+python scripts/smoke_sqlserver_ask.py
+```
+
+The script sets the SQL Server env overrides in-process via
+`os.environ`, mounts the FastAPI app with `TestClient`, and prints the
+emitted SQL + the `meta` block for each question. It does not touch
+`backend/.env`.
+
 ## What Phase C3 ships in code
 
 - `backend/db/sqlserver/*.sql` — schema + seed scripts (this document).
