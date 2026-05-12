@@ -106,3 +106,52 @@ def test_004_creates_unique_index_on_plan_cache():
     text = (SQL_DIR / "004_create_bi_meta_objects.sql").read_text(encoding="utf-8")
     assert "UX_bi_meta_plan_cache_question_catalog" in text
     assert "(question_norm, catalog_hash)" in text
+
+
+# ---- Reserved-keyword guard ------------------------------------------------
+# T-SQL reserved words that the project actively uses as column names.
+# Each must appear bracketed ([plan], [sql], ...) in CREATE TABLE column
+# lists; SSMS rejects the unbracketed form with
+# "Incorrect syntax near the keyword '<word>'".
+_TSQL_RESERVED_AS_COLNAMES = ["plan", "sql"]
+
+
+@pytest.mark.parametrize("kw", _TSQL_RESERVED_AS_COLNAMES)
+def test_reserved_keyword_columns_are_bracketed_in_create_table(kw):
+    """Catch the SSMS error
+    'Incorrect syntax near the keyword <kw>' by failing in CI if a
+    column declaration ever uses the bare reserved name."""
+    text = (SQL_DIR / "004_create_bi_meta_objects.sql").read_text(encoding="utf-8")
+
+    # Forbid lines like "        plan            NVARCHAR(MAX)  NOT NULL,"
+    # i.e. the bare keyword followed by whitespace and a type, at the
+    # start of a column definition (anywhere not preceded by '[').
+    bare_col = re.compile(
+        rf"(?m)^(?!\s*--)\s+(?<!\[){re.escape(kw)}\s+(?:N?VARCHAR|INT|BIGINT|BIT|DATETIME|DECIMAL|DATE|FLOAT|MONEY)",
+        flags=re.IGNORECASE,
+    )
+    assert not bare_col.search(text), (
+        f"Unbracketed reserved keyword {kw!r} found as a column name in 004."
+    )
+
+    # And the bracketed form must exist (we *do* expect the column).
+    bracketed = f"[{kw}]"
+    assert bracketed in text, f"Expected bracketed {bracketed} in 004."
+
+
+def test_query_log_has_bracketed_plan_and_sql_columns():
+    text = (SQL_DIR / "004_create_bi_meta_objects.sql").read_text(encoding="utf-8")
+    # Both columns must live inside the query_log create block.
+    log_start = text.find("CREATE TABLE bi_meta.query_log")
+    assert log_start != -1
+    log_body = text[log_start:text.find("END", log_start)]
+    assert "[plan]" in log_body
+    assert "[sql]" in log_body
+
+
+def test_plan_cache_has_bracketed_plan_column():
+    text = (SQL_DIR / "004_create_bi_meta_objects.sql").read_text(encoding="utf-8")
+    pc_start = text.find("CREATE TABLE bi_meta.plan_cache")
+    assert pc_start != -1
+    pc_body = text[pc_start:text.find("END", pc_start)]
+    assert "[plan]" in pc_body

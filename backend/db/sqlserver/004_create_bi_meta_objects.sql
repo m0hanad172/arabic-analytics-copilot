@@ -87,7 +87,8 @@ BEGIN
         question_norm   NVARCHAR(2000) NOT NULL,
         question_raw    NVARCHAR(MAX)  NOT NULL,
         catalog_hash    NVARCHAR(128)  NOT NULL,
-        plan            NVARCHAR(MAX)  NOT NULL, -- JSON string
+        -- "plan" is a T-SQL reserved keyword; bracket every reference.
+        [plan]          NVARCHAR(MAX)  NOT NULL, -- JSON string
         model           NVARCHAR(128)  NOT NULL,
         hits            BIGINT         NOT NULL CONSTRAINT DF_bi_meta_plan_cache_hits         DEFAULT (0),
         created_at      DATETIMEOFFSET NOT NULL CONSTRAINT DF_bi_meta_plan_cache_created_at   DEFAULT (SYSUTCDATETIME()),
@@ -116,8 +117,10 @@ BEGIN
             CONSTRAINT PK_bi_meta_query_log PRIMARY KEY,
         created_at   DATETIMEOFFSET NOT NULL CONSTRAINT DF_bi_meta_query_log_created_at DEFAULT (SYSUTCDATETIME()),
         question     NVARCHAR(MAX)  NOT NULL,
-        plan         NVARCHAR(MAX)  NOT NULL,  -- JSON string
-        sql          NVARCHAR(MAX)  NOT NULL,
+        -- "plan" and "sql" are T-SQL reserved keywords; bracket every
+        -- reference. Phase C4 cache/log SQL must use [plan] / [sql] too.
+        [plan]       NVARCHAR(MAX)  NOT NULL,  -- JSON string
+        [sql]        NVARCHAR(MAX)  NOT NULL,
         row_count    INT            NOT NULL CONSTRAINT DF_bi_meta_query_log_row_count   DEFAULT (0),
         warnings     NVARCHAR(MAX)  NULL,
         suggestions  NVARCHAR(MAX)  NULL,
