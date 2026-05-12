@@ -8,11 +8,20 @@ import hashlib
 from pathlib import Path
 from typing import Any, Optional, Dict, List, Tuple
 
-import asyncpg  # type: ignore[import-untyped]
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
 from backend.app.core.sql_guardrails import guard_sql_or_raise
+from backend.app.db.adapter import (
+    BackendNotSupportedError,
+    controlled_backend_error_message,
+    ensure_json_obj as _ensure_json_obj,
+    is_sqlserver,
+    normalize_database_url_for_asyncpg as _asyncpg_dsn,
+    pg_fetch,
+    pg_fetchrow,
+    pg_fetchval,
+)
 from backend.app.services.ask.catalog import _augment_catalog
 from backend.app.services.ask.cache import _normalize_question, _cache_get_plan, _cache_upsert_plan
 from backend.app.services.ask.plan_normalize import finalize_plan
@@ -113,53 +122,20 @@ except Exception:
 # -----------------------
 # DB helpers
 # -----------------------
-def _asyncpg_dsn(sqlalchemy_url: str) -> str:
-    return sqlalchemy_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-
-
-def _ensure_json_obj(x: Any) -> Any:
-    if isinstance(x, str):
-        try:
-            return json.loads(x)
-        except Exception:
-            return x
-    return x
-
-
+# Phase B: asyncpg has been moved into backend/app/db/adapter.py. We keep
+# the historical module-level names so eval.py and services/ask/db.py
+# continue to import them unchanged. On SQL Server, these raise
+# BackendNotSupportedError (mapped to HTTP 501 at the route boundary).
 async def _db_fetchval(sql: str, *args) -> Any:
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set in backend/.env")
-    conn = await asyncpg.connect(_asyncpg_dsn(DATABASE_URL))
-    try:
-        await conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS};")
-        val = await conn.fetchval(sql, *args)
-        return _ensure_json_obj(val)
-    finally:
-        await conn.close()
+    return await pg_fetchval(sql, *args)
 
 
 async def _db_fetchrow(sql: str, *args) -> Optional[dict]:
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set in backend/.env")
-    conn = await asyncpg.connect(_asyncpg_dsn(DATABASE_URL))
-    try:
-        await conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS};")
-        row = await conn.fetchrow(sql, *args)
-        return dict(row) if row else None
-    finally:
-        await conn.close()
+    return await pg_fetchrow(sql, *args)
 
 
 async def _db_fetch(sql: str, *args) -> List[dict]:
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set in backend/.env")
-    conn = await asyncpg.connect(_asyncpg_dsn(DATABASE_URL))
-    try:
-        await conn.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS};")
-        recs = await conn.fetch(sql, *args)
-        return [dict(r) for r in recs]
-    finally:
-        await conn.close()
+    return await pg_fetch(sql, *args)
 
 
 def _catalog_hash(catalog: dict) -> str:
@@ -549,6 +525,12 @@ async def ask(
     question = getattr(body, "question", None) or ""
     if not str(question).strip():
         raise HTTPException(status_code=422, detail="question is required")
+
+    # Phase B: SQL Server cannot serve /ask yet (depends on bi_meta.*).
+    # Return a controlled 501 instead of letting asyncpg surface a
+    # confusing driver-level error.
+    if is_sqlserver():
+        raise HTTPException(status_code=501, detail=controlled_backend_error_message())
 
     catalog, catalog_source = await _get_catalog_with_source("bi")
     c_hash = _catalog_hash(catalog)
