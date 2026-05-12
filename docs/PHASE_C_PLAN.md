@@ -81,7 +81,28 @@ list of changes. Highlights:
 - Migrate `services/query_service.py` off `utils/sql_safety.py`
   (deferred from Phase B).
 
-### C3 — Cleanup and adoption
+### C3 status: completed
+
+Phase C3 shipped the SQL Server schema/seed scripts under
+`backend/db/sqlserver/`, the portable catalog loader at
+`backend/app/services/catalog_loader.py`, and wired the runner to use
+that loader on SQL Server. T-SQL date expressions
+(`DATEPART(...)`, `DATEFROMPARTS(...)`) are seeded into
+`bi_meta.dimensions` so date-bucket dimensions now compile on SQL
+Server. See `docs/SQLSERVER_MIGRATION_PLAN.md` and the *Phase C3
+Result* section of `docs/DATABASE_MIGRATION.md` for details.
+
+### C4 — Cache/log + live SQL Server validation (next, awaits go)
+
+- Portable `plan_cache` upsert (`MERGE` / `ON CONFLICT`) and
+  `query_log` insert via the dialect, so the
+  `meta.skipped_for_sqlserver` flags from Phase C2 finally clear.
+- Data-load script for `bi.fact_sales_line` (CSV → SQL Server).
+- Live smoke test against `MOHANADLENOVO\SQLEXPRESS` (or a
+  containerised mssql).
+- Migrate `services/query_service.py` off `utils/sql_safety.py`.
+
+### C5 — Cleanup and adoption
 
 - Default `COMPILER_BACKEND=python`.
 - Optionally retire `bi_meta.compile_query` and `bi_meta.run_query` for

@@ -187,6 +187,52 @@ def test_ask_uses_python_compiler_on_sqlserver_and_skips_pg_only_io(monkeypatch)
     assert "::NUMERIC" not in upper
 
 
+def test_ask_uses_sqlserver_catalog_loader(monkeypatch):
+    """Phase C3: on SQL Server the runner must call the new
+    load_sqlserver_catalog helper instead of bi_meta.get_catalog()."""
+    from backend.app.services import catalog_loader
+
+    monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+
+    called = {"sqlserver_catalog": False, "pg_fetchval": False}
+
+    async def fake_sql_loader(schema: str):
+        called["sqlserver_catalog"] = True
+        return {
+            "schema": "bi",
+            "base_view": "bi.vw_fact_sales_line_clean",
+            "metrics": [
+                {"key": "net_sales", "agg": "sum", "sql": "sum(f.order_total)"},
+            ],
+            "dimensions": [
+                {"key": "city", "sql": "f.city"},
+                {"key": "order_year", "sql": "DATEPART(year, f.order_date_d)"},
+            ],
+            "synonyms": [],
+        }
+
+    async def fake_fetch_select(sql: str):
+        return [{"city": "Sydney", "net_sales": 1.0}]
+
+    async def boom(*a, **k):  # asyncpg helpers must not run on SQL Server
+        called["pg_fetchval"] = True
+        raise AssertionError("asyncpg used in sqlserver path")
+
+    monkeypatch.setattr(catalog_loader, "load_sqlserver_catalog", fake_sql_loader)
+    monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
+    monkeypatch.setattr(ask_runner, "_db_fetchval", boom)
+    monkeypatch.setattr(ask_runner, "_db_fetchrow", boom)
+
+    body = SimpleNamespace(question="صافي المبيعات حسب المدينة")
+    out = asyncio.run(ask_runner.ask(body))
+
+    assert called["sqlserver_catalog"] is True
+    assert called["pg_fetchval"] is False
+    assert out["meta"]["compiler_backend"] == "python"
+    assert out["meta"]["catalog_source"] == "sqlserver_tables"
+
+
 def test_ask_db_path_still_501_on_sqlserver_with_phase_c2_hint(monkeypatch):
     monkeypatch.setattr(settings, "compiler_backend", "db", raising=False)
     monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)

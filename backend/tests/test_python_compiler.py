@@ -197,6 +197,38 @@ class TestCompilerSqlServer:
                 CATALOG, dialect=self.ms,
             )
 
+    def test_tsql_date_dimensions_pass_through(self):
+        """Phase C3: when the catalog already stores T-SQL date
+        expressions (DATEPART / DATEFROMPARTS), the compiler must let
+        them through unchanged on SQL Server."""
+        tsql_catalog = Catalog.from_bi_meta({
+            "schema": "bi",
+            "base_view": "bi.vw_fact_sales_line_clean",
+            "metrics": [
+                {"key": "net_sales", "agg": "sum", "sql": "sum(f.order_total)"},
+            ],
+            "dimensions": [
+                {"key": "order_year", "sql": "DATEPART(year, f.order_date_d)"},
+                {"key": "order_quarter", "sql": "DATEPART(quarter, f.order_date_d)"},
+                {"key": "order_month", "sql": "DATEPART(month, f.order_date_d)"},
+                {"key": "month_start",
+                 "sql": "DATEFROMPARTS(YEAR(f.order_date_d), MONTH(f.order_date_d), 1)"},
+            ],
+        })
+        for dim, expected in [
+            ("order_year", "DATEPART(year, f.order_date_d) AS [order_year]"),
+            ("order_quarter", "DATEPART(quarter, f.order_date_d) AS [order_quarter]"),
+            ("order_month", "DATEPART(month, f.order_date_d) AS [order_month]"),
+            ("month_start",
+             "DATEFROMPARTS(YEAR(f.order_date_d), MONTH(f.order_date_d), 1) AS [month_start]"),
+        ]:
+            sql = compile_plan(
+                {"metrics": ["net_sales"], "dimensions": [dim], "limit": 5},
+                tsql_catalog, dialect=self.ms,
+            )
+            self._bans(sql)
+            assert expected in sql, sql
+
     def test_groupby_simple_dim(self):
         sql = compile_plan(
             {"metrics": ["net_sales"], "dimensions": ["city"], "limit": 5},
