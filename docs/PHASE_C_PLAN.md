@@ -42,7 +42,26 @@ and the Phase B DB adapter.
 - `/ask` integration is **not** flipped in C1. Compiler is exercised
   only through unit tests.
 
-### C2 — Wire-up and parity (next, awaits explicit go)
+### C2 status: completed
+
+See `docs/DATABASE_MIGRATION.md → "Phase C2 Result"` for the full
+list of changes. Highlights:
+
+- `/ask` now dispatches between `bi_meta.compile_query` and the C1
+  Python compiler via the `COMPILER_BACKEND` flag (default `db`).
+- A new dialect-aware executor (`backend/app/db/adapter.fetch_select`)
+  routes execution through asyncpg on PG and SQLAlchemy on SQL Server.
+- Phase B's blanket SQL Server 501 is now scoped to the `db` compiler
+  path. `DATABASE_BACKEND=sqlserver` + `COMPILER_BACKEND=python` runs
+  end-to-end without asyncpg.
+- PG-only `plan_cache`/`query_log` writes are skipped on SQL Server
+  and listed in `meta.skipped_for_sqlserver`.
+- Existing C1 contract preserved: date-bucket dimensions
+  (`order_year`, `order_quarter`, `order_month`, `month_start`) raise
+  `UnsupportedDimensionForBackend` on SQL Server until T-SQL date
+  expressions are added.
+
+### C2 — Wire-up and parity (original brief, now executed)
 
 - Connect `runner.py`'s plan-compile step to the Python compiler when
   `COMPILER_BACKEND=python`. Keep the DB path as fallback.

@@ -195,6 +195,33 @@ async def pg_fetch(sql: str, *args: Any) -> list[dict]:
         await conn.close()
 
 
+async def fetch_select(sql: str) -> list[dict]:
+    """Execute a SELECT and return rows as a list of dicts.
+
+    Dispatches to the right driver for the active backend:
+    - PostgreSQL: asyncpg via :func:`pg_fetch`.
+    - SQL Server: SQLAlchemy ``AsyncSession``.
+
+    Phase C2 wires this into ``/ask`` once SQL is built by either the
+    PG ``bi_meta.compile_query`` path or the new Python compiler.
+    """
+    if is_postgres():
+        return await pg_fetch(sql)
+
+    # SQL Server (or any non-PG): use SQLAlchemy.
+    from sqlalchemy import text  # local import to keep top-of-module light
+    from backend.app.db.session import SessionLocal
+
+    async with SessionLocal() as session:
+        result = await session.execute(text(sql))
+        cols = list(result.keys())
+        rows = result.fetchall()
+        return [
+            {cols[i]: normalize_value(r[i]) for i in range(len(cols))}
+            for r in rows
+        ]
+
+
 __all__ = [
     "BackendNotSupportedError",
     "controlled_backend_error_message",
@@ -208,4 +235,5 @@ __all__ = [
     "pg_fetchval",
     "pg_fetchrow",
     "pg_fetch",
+    "fetch_select",
 ]

@@ -1,0 +1,200 @@
+"""/ask + COMPILER_BACKEND dispatch (Phase C2).
+
+Covers:
+- Default backend value is "db" so PG behaviour is preserved.
+- compile_for_request returns (sql, "db") on PG when COMPILER_BACKEND=db
+  and (sql, "python") when COMPILER_BACKEND=python.
+- The Python compiler path works end-to-end on both PG and SQL Server
+  (catalog + executor are mocked so the test stays DB-free).
+- The legacy db path on SQL Server still returns the Phase B 501 with
+  a Phase C2 hint to set COMPILER_BACKEND=python.
+- Cache and query_log writes are skipped on SQL Server.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from backend.app.core.config import settings
+from backend.app.db import adapter
+from backend.app.services.ask import compile as ask_compile
+from backend.app.services.ask import runner as ask_runner
+
+
+# Live catalog shape (trimmed) for compiler dispatch tests.
+CATALOG = {
+    "schema": "bi",
+    "base_view": "bi.vw_fact_sales_line_clean",
+    "metrics": [
+        {"key": "net_sales", "agg": "sum", "sql": "sum(f.order_total::numeric)", "data_type": "numeric"},
+        {"key": "order_count", "agg": "count", "sql": "COUNT(*)::bigint", "data_type": "integer"},
+    ],
+    "dimensions": [
+        {"key": "city", "sql": "f.city", "data_type": "text"},
+    ],
+}
+
+
+# ============================================================================
+# Default behaviour
+# ============================================================================
+def test_default_compiler_backend_is_db():
+    # Settings default; no env override required.
+    assert ask_compile.active_compiler_backend() == "db"
+
+
+def test_unknown_compiler_backend_falls_back_to_db(monkeypatch):
+    monkeypatch.setattr(settings, "compiler_backend", "wat", raising=False)
+    assert ask_compile.active_compiler_backend() == "db"
+
+
+# ============================================================================
+# Compiler dispatch (no DB connection needed for the python path)
+# ============================================================================
+class TestCompileDispatch:
+    PLAN = {
+        "metrics": ["net_sales"],
+        "dimensions": ["city"],
+        "sort": [{"field": "net_sales", "dir": "desc"}],
+        "limit": 5,
+    }
+
+    def test_python_path_does_not_touch_db(self, monkeypatch):
+        monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+        # Sentinel: if anything tried to touch asyncpg, this would raise.
+        monkeypatch.setattr(
+            ask_compile, "pg_fetchval",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("DB used in python path")),
+        )
+        sql, used = asyncio.run(ask_compile.compile_for_request(self.PLAN, CATALOG))
+        assert used == "python"
+        assert "f.city AS" in sql
+        assert "sum(f.order_total::numeric) AS" in sql  # PG dialect (default)
+        assert sql.rstrip(";").rstrip().endswith("LIMIT 5")
+        assert sql.endswith(";")
+
+    def test_python_path_uses_sqlserver_dialect_when_active(self, monkeypatch):
+        monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+        monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+        sql, used = asyncio.run(ask_compile.compile_for_request(self.PLAN, CATALOG))
+        assert used == "python"
+        upper = sql.upper()
+        assert "TOP (5)" in sql
+        assert "::NUMERIC" not in upper
+        assert "::BIGINT" not in upper
+        assert "ILIKE" not in upper
+
+    def test_db_path_rejects_sqlserver(self, monkeypatch):
+        monkeypatch.setattr(settings, "compiler_backend", "db", raising=False)
+        monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+        with pytest.raises(adapter.BackendNotSupportedError) as ei:
+            asyncio.run(ask_compile.compile_for_request(self.PLAN, CATALOG))
+        assert "COMPILER_BACKEND=python" in str(ei.value)
+
+
+# ============================================================================
+# /ask end-to-end with the python compiler (catalog + executor mocked)
+# ============================================================================
+class _Captured:
+    """Holder used by the executor mock so tests can inspect the SQL."""
+    def __init__(self):
+        self.last_sql: str | None = None
+
+
+def _install_runner_mocks(monkeypatch, captured: _Captured, *, pg_logging_should_be_called=True):
+    """Patch the catalog loader and executor so /ask runs without a DB.
+
+    Returns ``capture_state`` populated by the executor when called.
+    """
+    async def fake_catalog(schema="bi"):
+        return CATALOG, "mock"
+
+    async def fake_fetch_select(sql: str):
+        captured.last_sql = sql
+        # Return a single fake row matching the SELECT alias contract.
+        return [{"city": "Sydney", "net_sales": 100.0}]
+
+    # Disable pg_logging side-channels so the test never opens asyncpg.
+    async def fake_db_fetchval(*a, **k):
+        # Tests should not depend on this being called; only the
+        # PG-only query_log insert reaches here when running under
+        # database_backend=postgres.
+        if not pg_logging_should_be_called:
+            raise AssertionError("Unexpected asyncpg call in test")
+        return None  # log_id = None
+
+    async def fake_db_fetchrow(*a, **k):
+        return None  # cache miss
+
+    monkeypatch.setattr(ask_runner, "_get_catalog_with_source", fake_catalog)
+    monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
+    monkeypatch.setattr(ask_runner, "_db_fetchval", fake_db_fetchval)
+    monkeypatch.setattr(ask_runner, "_db_fetchrow", fake_db_fetchrow)
+
+
+def test_ask_uses_python_compiler_on_postgres(monkeypatch):
+    monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "postgres", raising=False)
+
+    cap = _Captured()
+    _install_runner_mocks(monkeypatch, cap)
+
+    body = SimpleNamespace(question="صافي المبيعات حسب المدينة")
+    out = asyncio.run(ask_runner.ask(body))
+
+    assert out["meta"]["compiler_backend"] == "python"
+    assert out["meta"]["skipped_for_sqlserver"] is None
+    # SQL was generated by the Python compiler against the mocked catalog.
+    assert cap.last_sql is not None
+    assert "FROM bi.vw_fact_sales_line_clean f" in cap.last_sql
+    assert cap.last_sql.endswith(";")
+    # Result shape preserved.
+    assert out["question"] == "صافي المبيعات حسب المدينة"
+    assert isinstance(out["plan"], dict)
+    assert "sql" in out["result"]
+    assert isinstance(out["result"]["rows"], list)
+
+
+def test_ask_uses_python_compiler_on_sqlserver_and_skips_pg_only_io(monkeypatch):
+    monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+
+    cap = _Captured()
+    _install_runner_mocks(monkeypatch, cap, pg_logging_should_be_called=False)
+
+    body = SimpleNamespace(question="صافي المبيعات حسب المدينة")
+    out = asyncio.run(ask_runner.ask(body))
+
+    # No more Phase B 501 when compiler_backend=python.
+    assert out["meta"]["compiler_backend"] == "python"
+
+    # PG-only side channels skipped.
+    skipped = out["meta"]["skipped_for_sqlserver"] or []
+    assert "plan_cache" in skipped
+    assert "query_log" in skipped
+    assert out["meta"]["log_id"] is None
+
+    # Generated SQL uses the SQL Server dialect.
+    upper = (cap.last_sql or "").upper()
+    assert "TOP (" in upper
+    import re
+    assert not re.search(r"\bLIMIT\s+\d+", upper)
+    assert "::BIGINT" not in upper
+    assert "::NUMERIC" not in upper
+
+
+def test_ask_db_path_still_501_on_sqlserver_with_phase_c2_hint(monkeypatch):
+    monkeypatch.setattr(settings, "compiler_backend", "db", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+
+    body = SimpleNamespace(question="صافي المبيعات")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(ask_runner.ask(body))
+
+    assert ei.value.status_code == 501
+    assert "COMPILER_BACKEND=python" in ei.value.detail
+    assert "bi_meta" in ei.value.detail

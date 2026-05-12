@@ -233,6 +233,102 @@ still returns the controlled HTTP 501 introduced in Phase B.
    exercise `/health`, `/schema`, `/query`, `/ask` (now expected to
    succeed).
 
+## Phase C2 Result
+
+**Goal:** wire the Phase C1 Python compiler into `/ask` behind the
+`COMPILER_BACKEND` flag. Default behaviour is unchanged.
+
+### How to enable the Python compiler
+
+```env
+COMPILER_BACKEND=python
+```
+
+Default remains `COMPILER_BACKEND=db`.
+
+### What was added
+
+- New dispatcher [backend/app/services/ask/compile.py](backend/app/services/ask/compile.py):
+  - `active_compiler_backend()` resolves the active value with a safe
+    fallback to `db` on unknown values.
+  - `compile_for_request(plan, catalog, *, dialect=None) -> (sql, used)`
+    runs either `bi_meta.compile_query` (`db`) or the C1
+    `compile_plan(...)` (`python`).
+  - `db` path raises `BackendNotSupportedError` on SQL Server with a
+    hint to switch to `COMPILER_BACKEND=python`.
+- New executor in [backend/app/db/adapter.py](backend/app/db/adapter.py):
+  - `fetch_select(sql)` — PostgreSQL uses asyncpg (`pg_fetch`); SQL
+    Server uses SQLAlchemy `AsyncSession` via `db/session.py`. Rows are
+    normalised through `normalize_value` for JSON serialisation.
+- [backend/app/services/ask/runner.py](backend/app/services/ask/runner.py):
+  - Phase B's blanket `if is_sqlserver(): 501` is now scoped: it only
+    fires when `compiler_backend == "db"` (db compiler needs PG). The
+    message is updated to hint at `COMPILER_BACKEND=python`.
+  - `bi_meta.compile_query` call replaced with `compile_for_request(...)`.
+  - Row execution replaced with `fetch_select(...)`.
+  - PG-only cache reads (`_cache_get_plan`, `_cache_touch`) and writes
+    (`_cache_upsert_plan`) gated on `is_postgres()`.
+  - `bi_meta.query_log` insert gated on `is_postgres()`.
+  - Response `meta` gains two fields:
+    - `compiler_backend` — `"db"` or `"python"`.
+    - `skipped_for_sqlserver` — list of PG-only side channels skipped
+      (`plan_cache`, `query_log`) on SQL Server, or `None`.
+
+### What still depends on PostgreSQL
+
+- `services/catalog_cache.py` and `services/ask/runner._get_catalog_with_source`
+  still call `bi_meta.get_catalog()`. SQL Server installations need a
+  catalog loader that reads the `bi_meta.{metrics,dimensions,synonyms}`
+  tables directly. Tests inject a catalog dict to exercise the
+  SQL Server path; production SQL Server deployments will need either
+  this loader or a one-off catalog seed.
+- `bi_meta.plan_cache` upsert (`ON CONFLICT`) and `bi_meta.query_log`
+  insert remain PG-only. On SQL Server they are skipped cleanly and
+  the response's `meta.skipped_for_sqlserver` lists them.
+- Date-bucket dimensions (`order_year`, `order_quarter`, `order_month`,
+  `month_start`) still raise `UnsupportedDimensionForBackend` on SQL
+  Server until T-SQL date expressions are added to the Python compiler.
+- `services/ask/cache.py` and `api/routes/{eval,logs}.py` still issue
+  PG-specific SQL against `bi_meta.*` tables.
+- `services/query_service.py` still uses `utils/sql_safety.py` (the
+  older guardrail). Migration to `core/sql_guardrails.guard_sql_or_raise`
+  is deferred from Phase B; nothing depends on doing it before the
+  SQL Server schema migration.
+
+### What SQL Server can now do
+
+With `DATABASE_BACKEND=sqlserver` and `COMPILER_BACKEND=python`:
+
+- `/ask` no longer returns Phase B's blanket 501.
+- The active dialect is SQL Server; the Python compiler emits T-SQL
+  (`TOP (n)`, `COUNT_BIG(*)`, `CAST(... AS NUMERIC(38,6))`, `LIKE`).
+- No asyncpg connection is opened; SQL goes through the SQLAlchemy
+  `AsyncSession` (which loads the configured driver lazily).
+- Guardrails still apply.
+- `plan_cache` and `query_log` writes are skipped and surfaced in
+  `meta.skipped_for_sqlserver`.
+
+### What remains for SQL Server schema/data migration (Phase C3 candidates)
+
+1. **Catalog loader**: read `bi_meta.metrics` / `bi_meta.dimensions` /
+   `bi_meta.synonyms` directly via SQLAlchemy and build the JSON shape
+   in Python — so SQL Server only needs the tables, not the
+   `get_catalog()` function.
+2. **Schema/data scripts for SQL Server**: ship `db/sqlserver/`
+   migration scripts that create `bi.vw_fact_sales_line_clean`,
+   `bi_meta.metrics`, `bi_meta.dimensions`, `bi_meta.synonyms`,
+   `bi_meta.plan_cache`, `bi_meta.query_log` with T-SQL syntax.
+3. **Portable plan_cache / query_log**: implement upsert/insert via
+   the dialect (`INSERT ... ON CONFLICT` on PG, `MERGE` /
+   check-then-insert on SQL Server).
+4. **Date-bucket dimensions on T-SQL**: emit `DATEPART(year, ...)`,
+   quarter / month start expressions in the Python compiler.
+5. **Live SQL Server smoke test**: boot
+   `mcr.microsoft.com/mssql/server:2022`, point `DATABASE_URL` at it,
+   and exercise `/health`, `/schema`, `/query`, `/ask` end-to-end.
+6. **`services/query_service.py`** off `utils/sql_safety.py` (deferred
+   from Phase B).
+
 ## Future phases (carried over from Phase A)
 
 Driver and connection abstraction.
