@@ -102,6 +102,80 @@ def test_003_creates_view_aliasing_date_columns():
     assert "bi.vw_fact_sales_line_clean" in text
 
 
+# ---- Nullability guard ----------------------------------------------------
+# Every business column in bi.fact_sales_line must be nullable. The CSV
+# import (SSMS Import Flat File / bcp) fails with "Column '<x>' does not
+# allow DBNull.Value" when a destination column is NOT NULL but the CSV
+# has blank cells in it. We assert:
+#   (a) the CREATE TABLE declares it NULL, AND
+#   (b) the script issues an idempotent ALTER COLUMN ... NULL to heal a
+#       table that was created from an older draft with NOT NULL.
+_FACT_SALES_LINE_COLUMNS = [
+    "order_no", "order_date", "ship_date", "ship_delay_days",
+    "customer_type", "account_manager", "order_priority",
+    "product_name", "product_category", "product_container", "ship_mode",
+    "city", "state",
+    "cost_price", "retail_price", "order_quantity",
+    "sub_total", "discount_pct", "discount_amount", "order_total",
+    "shipping_cost", "total", "cogs", "gross_profit",
+    "profit_after_shipping",
+    "order_year", "order_month", "order_quarter",
+]
+
+
+@pytest.mark.parametrize("col", _FACT_SALES_LINE_COLUMNS)
+def test_fact_sales_line_column_declared_nullable_in_create(col):
+    text = (SQL_DIR / "003_create_bi_objects.sql").read_text(encoding="utf-8")
+    # Find the CREATE TABLE bi.fact_sales_line block (up to the closing ");").
+    create_start = text.find("CREATE TABLE bi.fact_sales_line")
+    assert create_start != -1
+    create_end = text.find("    );", create_start)
+    assert create_end != -1
+    create_body = text[create_start:create_end]
+
+    # The column line must end with " NULL" (with optional trailing
+    # comma — the last column in CREATE TABLE has no comma).
+    pattern = re.compile(
+        rf"^\s+{re.escape(col)}\s+\S.*?\sNULL,?\s*$",
+        flags=re.MULTILINE,
+    )
+    not_null = re.compile(
+        rf"^\s+{re.escape(col)}\s+\S.*?\sNOT\s+NULL",
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    assert pattern.search(create_body), f"Column {col} not declared NULL in CREATE TABLE"
+    assert not not_null.search(create_body), f"Column {col} is NOT NULL in CREATE TABLE"
+
+
+@pytest.mark.parametrize("col", _FACT_SALES_LINE_COLUMNS)
+def test_fact_sales_line_has_alter_column_null_safety_net(col):
+    """Re-running 003 must heal a table that was created earlier with
+    NOT NULL constraints. We require an explicit ALTER COLUMN ... NULL
+    for every business column."""
+    text = (SQL_DIR / "003_create_bi_objects.sql").read_text(encoding="utf-8")
+    alter = re.compile(
+        rf"ALTER TABLE bi\.fact_sales_line\s+ALTER COLUMN\s+{re.escape(col)}\b.*\bNULL\s*;",
+        flags=re.IGNORECASE,
+    )
+    assert alter.search(text), f"Missing ALTER COLUMN ... NULL safety net for {col}"
+
+
+def test_gross_profit_is_nullable():
+    """Pinned regression for the specific SSMS Import Flat File error
+    'Column gross_profit does not allow DBNull.Value'."""
+    text = (SQL_DIR / "003_create_bi_objects.sql").read_text(encoding="utf-8")
+    # Bare CREATE TABLE line must be NULL.
+    assert re.search(
+        r"^\s+gross_profit\s+DECIMAL\(38,\s*6\)\s+NULL,\s*$",
+        text, flags=re.MULTILINE,
+    )
+    # And the ALTER safety net must be present.
+    assert re.search(
+        r"ALTER TABLE bi\.fact_sales_line\s+ALTER COLUMN\s+gross_profit\b.*\bNULL\s*;",
+        text, flags=re.IGNORECASE,
+    )
+
+
 def test_004_creates_unique_index_on_plan_cache():
     text = (SQL_DIR / "004_create_bi_meta_objects.sql").read_text(encoding="utf-8")
     assert "UX_bi_meta_plan_cache_question_catalog" in text

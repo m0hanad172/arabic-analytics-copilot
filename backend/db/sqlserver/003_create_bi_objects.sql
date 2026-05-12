@@ -58,6 +58,49 @@ BEGIN
 END
 GO
 
+-- ---------------------------------------------------------------------------
+-- Ensure every business column is nullable.
+--
+-- SSMS *Import Flat File...* fails with "Column '<x>' does not allow
+-- DBNull.Value" when the destination column is NOT NULL but the CSV
+-- has any blank cell in that column. We declare every business
+-- column as NULL above, but a previously-created table from an older
+-- draft of this script may have NOT NULL constraints baked in.
+-- ALTER COLUMN ... NULL is idempotent (a no-op when the column is
+-- already nullable) and runs against the existing table without
+-- requiring a drop.
+-- ---------------------------------------------------------------------------
+PRINT N'Ensuring bi.fact_sales_line business columns are nullable...';
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_no              NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_date            DATE           NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN ship_date             DATE           NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN ship_delay_days       INT            NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN customer_type         NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN account_manager       NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_priority        NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN product_name          NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN product_category      NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN product_container     NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN ship_mode             NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN city                  NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN state                 NVARCHAR(400)  NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN cost_price            DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN retail_price          DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_quantity        INT            NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN sub_total             DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN discount_pct          DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN discount_amount       DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_total           DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN shipping_cost         DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN total                 DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN cogs                  DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN gross_profit          DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN profit_after_shipping DECIMAL(38, 6) NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_year            INT            NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_month           INT            NULL;
+ALTER TABLE bi.fact_sales_line ALTER COLUMN order_quarter         INT            NULL;
+GO
+
 -- Helpful index for date filters in /ask.
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
