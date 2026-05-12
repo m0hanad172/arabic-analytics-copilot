@@ -16,11 +16,17 @@ from backend.app.db.adapter import (
     BackendNotSupportedError,
     controlled_backend_error_message,
     ensure_json_obj as _ensure_json_obj,
+    fetch_select,
+    is_postgres,
     is_sqlserver,
     normalize_database_url_for_asyncpg as _asyncpg_dsn,
     pg_fetch,
     pg_fetchrow,
     pg_fetchval,
+)
+from backend.app.services.ask.compile import (
+    active_compiler_backend,
+    compile_for_request,
 )
 from backend.app.services.ask.catalog import _augment_catalog
 from backend.app.services.ask.cache import _normalize_question, _cache_get_plan, _cache_upsert_plan
@@ -526,11 +532,18 @@ async def ask(
     if not str(question).strip():
         raise HTTPException(status_code=422, detail="question is required")
 
-    # Phase B: SQL Server cannot serve /ask yet (depends on bi_meta.*).
-    # Return a controlled 501 instead of letting asyncpg surface a
-    # confusing driver-level error.
-    if is_sqlserver():
-        raise HTTPException(status_code=501, detail=controlled_backend_error_message())
+    # Phase C2: only the *db* compiler path requires PostgreSQL. The
+    # *python* compiler can serve SQL Server end-to-end (catalog/cache/
+    # log still PG-only — those are skipped on SQL Server below).
+    compiler_backend = active_compiler_backend()
+    if is_sqlserver() and compiler_backend == "db":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                controlled_backend_error_message()
+                + " Set COMPILER_BACKEND=python to use the in-process compiler."
+            ),
+        )
 
     catalog, catalog_source = await _get_catalog_with_source("bi")
     c_hash = _catalog_hash(catalog)
@@ -545,8 +558,8 @@ async def ask(
     llm_mode_norm = (llm_mode or "").strip().lower()
 
 
-    # 1) cache
-    if use_cache:
+    # 1) cache (PostgreSQL-only: bi_meta.plan_cache uses ON CONFLICT)
+    if use_cache and is_postgres():
         cached = await _cache_get_plan(q_norm, c_hash, _db_fetchrow, _ensure_json_obj)
         if cached and cached.get("plan"):
             plan = cached["plan"]
@@ -693,23 +706,25 @@ async def ask(
         max_rows_cap=int(os.getenv("MAX_ROWS_CAP", "5000")),
     )
 
-    # cache if newly generated
-    if use_cache and not used_cache:
+    # cache if newly generated (PostgreSQL-only)
+    skipped_for_sqlserver: List[str] = []
+    if use_cache and not used_cache and is_postgres():
         if used_llm and llm_mode_norm == "mock":
             model_name = "mock"
         else:
             model_name = GEMINI_MODEL if used_llm else "rule_based"
 
         await _cache_upsert_plan(q_norm, str(question), c_hash, plan, model_name, _db_fetchval)
+    elif use_cache and not is_postgres():
+        skipped_for_sqlserver.append("plan_cache")
 
 
     # compile -> guardrails -> execute
     t0 = time.time()
     try:
-        compiled_sql = await _db_fetchval(
-            "SELECT bi_meta.compile_query($1::jsonb);",
-            json.dumps(plan, ensure_ascii=False),
-        )
+        compiled_sql, compiler_used = await compile_for_request(plan, catalog)
+    except BackendNotSupportedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Plan compile failed: {e}")
 
@@ -773,7 +788,7 @@ async def ask(
     safe_sql = _ensure_single_sql_terminator(safe_sql)
     safe_sql = re.sub(r";{2,}\s*$", ";", safe_sql)  # extra safety
 
-    rows = await _db_fetch(safe_sql)
+    rows = await fetch_select(safe_sql)
     duration_ms = int((time.time() - t0) * 1000)  # compile+guard+db only
     total_ms = int((time.time() - t_all) * 1000)  # includes LLM
 
@@ -793,29 +808,33 @@ async def ask(
     )
 
     log_id = None
-    try:
-        log_id = await _db_fetchval(
-            """
-            INSERT INTO bi_meta.query_log(
-                question, plan, sql, row_count, warnings, suggestions, duration_ms,
-                used_cache, used_llm, explain_used
+    # bi_meta.query_log uses jsonb + asyncpg placeholders; PG-only for now.
+    if is_postgres():
+        try:
+            log_id = await _db_fetchval(
+                """
+                INSERT INTO bi_meta.query_log(
+                    question, plan, sql, row_count, warnings, suggestions, duration_ms,
+                    used_cache, used_llm, explain_used
+                )
+                VALUES ($1, $2::jsonb, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
+                RETURNING id;
+                """,
+                str(question),
+                json.dumps(plan, ensure_ascii=False),
+                safe_sql,
+                len(rows),
+                json.dumps(warnings_all, ensure_ascii=False),
+                json.dumps(suggestions, ensure_ascii=False),
+                duration_ms,
+                bool(used_cache),
+                bool(used_llm),
+                bool(explain),
             )
-            VALUES ($1, $2::jsonb, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
-            RETURNING id;
-            """,
-            str(question),
-            json.dumps(plan, ensure_ascii=False),
-            safe_sql,
-            len(rows),
-            json.dumps(warnings_all, ensure_ascii=False),
-            json.dumps(suggestions, ensure_ascii=False),
-            duration_ms,
-            bool(used_cache),
-            bool(used_llm),
-            bool(explain),
-        )
-    except Exception:
-        pass
+        except Exception:
+            pass
+    else:
+        skipped_for_sqlserver.append("query_log")
 
     return {
         "question": str(question),
@@ -846,5 +865,7 @@ async def ask(
             "catalog_hash": c_hash,
             "explain_used": bool(explain),
             "explain_mode": ("rule" if explain else None),
+            "compiler_backend": compiler_used,
+            "skipped_for_sqlserver": skipped_for_sqlserver or None,
         },
     }
