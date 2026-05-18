@@ -12,29 +12,43 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote_plus
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-# ---- Override env BEFORE importing the app -------------------------------
-from urllib.parse import quote_plus
+from backend.app.db.sqlserver_connect import (
+    build_connection_string,
+    default_named_instance_server,
+    resolve_database_from_env,
+    resolve_driver_from_env,
+    resolve_sql_auth_from_env,
+)
+
 
 os.environ["DATABASE_BACKEND"] = "sqlserver"
 os.environ["COMPILER_BACKEND"] = "python"
 
-# The named-instance backslash ".\SQLEXPRESS" cannot survive a netloc
+# The named-instance backslash cannot survive a netloc
 # URL: %5C gets re-encoded and aioodbc receives a literal "%5C" in the
 # SERVER. SQLAlchemy's recommended workaround is odbc_connect=, which
 # passes the raw ODBC connection string through unchanged.
-_ODBC = (
-    "DRIVER={ODBC Driver 18 for SQL Server};"
-    r"SERVER=.\SQLEXPRESS;"
-    "DATABASE=ArabicAnalytics;"
-    "Trusted_Connection=yes;"
-    "TrustServerCertificate=yes;"
-    "Encrypt=no;"
+_SERVER = (
+    os.environ.get("MSSQL_SERVER")
+    or default_named_instance_server()
+)
+_SQL_USER, _SQL_PASSWORD = resolve_sql_auth_from_env()
+_ODBC = build_connection_string(
+    resolve_driver_from_env("ODBC Driver 18 for SQL Server") or "ODBC Driver 18 for SQL Server",
+    _SERVER,
+    database=resolve_database_from_env(),
+    trusted=True,
+    user=_SQL_USER,
+    password=_SQL_PASSWORD,
+    trust_server_cert=True,
+    encrypt=False,
 )
 os.environ["DATABASE_URL"] = (
     "mssql+aioodbc:///?odbc_connect=" + quote_plus(_ODBC)
@@ -63,7 +77,7 @@ def main() -> int:
             print(f"=== Q: {q} ===")
             r = client.post(
                 "/api/ask",
-                params={"use_llm": 0, "use_cache": 0, "explain": 0},
+                params={"use_llm": 0, "use_cache": 1, "explain": 0},
                 json={"question": q},
             )
             print(f"  status: {r.status_code}")
@@ -78,6 +92,8 @@ def main() -> int:
             print(f"  compiler_backend:    {meta.get('compiler_backend')}")
             print(f"  catalog_source:      {meta.get('catalog_source')}")
             print(f"  skipped_for_sqlserver: {meta.get('skipped_for_sqlserver')}")
+            print(f"  log_id:              {meta.get('log_id')}")
+            print(f"  used_cache:          {meta.get('used_cache')}")
             print(f"  row_count:           {len(rows)}")
             print(f"  SQL:                 {sql}")
             print(f"  first row:           {rows[0] if rows else None}")
@@ -85,6 +101,8 @@ def main() -> int:
             sql_upper = sql.upper()
             checks = [
                 ("contains TOP (", "TOP (" in sql_upper),
+                ("cache/log not skipped", meta.get("skipped_for_sqlserver") is None),
+                ("query_log id returned", meta.get("log_id") is not None),
                 ("no LIMIT n",     "LIMIT " not in sql_upper or not any(c.isdigit() for c in sql_upper.split("LIMIT", 1)[1][:5]) if "LIMIT" in sql_upper else True),
                 ("no ::bigint",    "::BIGINT" not in sql_upper),
                 ("no ::numeric",   "::NUMERIC" not in sql_upper),
@@ -93,6 +111,27 @@ def main() -> int:
             ]
             for label, ok in checks:
                 print(f"  check {label:18} -> {'OK' if ok else 'FAIL'}")
+                if not ok:
+                    raise AssertionError(f"SQL Server smoke check failed: {label}")
+
+        print()
+        print("=== Cache recheck ===")
+        r = client.post(
+            "/api/ask",
+            params={"use_llm": 0, "use_cache": 1, "explain": 0},
+            json={"question": questions[0]},
+        )
+        print(f"  status: {r.status_code}")
+        if r.status_code != 200:
+            print(f"  body: {r.text[:1200]}")
+            raise AssertionError("SQL Server cache recheck failed")
+        meta = (r.json().get("meta") or {})
+        print(f"  used_cache: {meta.get('used_cache')}")
+        print(f"  skipped_for_sqlserver: {meta.get('skipped_for_sqlserver')}")
+        if meta.get("used_cache") is not True:
+            raise AssertionError("SQL Server plan_cache was not reused")
+        if meta.get("skipped_for_sqlserver") is not None:
+            raise AssertionError("SQL Server cache/log side channels were skipped")
     return 0
 
 

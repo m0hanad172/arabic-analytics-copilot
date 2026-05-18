@@ -40,8 +40,7 @@ def test_build_connection_string_emits_encrypt_when_requested():
     assert "Encrypt=yes" in s2
 
 
-def test_build_connection_string_never_contains_password():
-    """No path through the builder should accept or emit a password."""
+def test_build_connection_string_defaults_to_windows_auth_without_password():
     s = ssc.build_connection_string(
         "ODBC Driver 18 for SQL Server", r".\SQLEXPRESS",
         database="ArabicAnalytics",
@@ -49,6 +48,32 @@ def test_build_connection_string_never_contains_password():
     lowered = s.lower()
     for forbidden in ("pwd=", "password=", "uid=", "user id="):
         assert forbidden not in lowered, f"forbidden token {forbidden!r} in {s!r}"
+
+
+def test_build_connection_string_supports_sql_auth_and_omits_trusted_connection():
+    s = ssc.build_connection_string(
+        "ODBC Driver 18 for SQL Server",
+        r".\SQLEXPRESS",
+        user="aac_app",
+        password="secret",
+        encrypt=False,
+    )
+    assert "UID=aac_app" in s
+    assert "PWD=secret" in s
+    assert "Trusted_Connection" not in s
+    assert "Encrypt=no" in s
+
+
+def test_mask_password_masks_pwd_values():
+    s = (
+        "DRIVER={ODBC Driver 18 for SQL Server};"
+        r"SERVER=.\SQLEXPRESS;"
+        "UID=aac_app;PWD=secret;Encrypt=no;"
+    )
+    masked = ssc.mask_password(s)
+    assert "PWD=***" in masked
+    assert "secret" not in masked
+    assert "UID=aac_app" in masked
 
 
 def test_build_connection_string_can_opt_out_of_trusted_connection():
@@ -60,18 +85,49 @@ def test_build_connection_string_can_opt_out_of_trusted_connection():
 
 # ---- Candidate iteration --------------------------------------------------
 def test_default_server_candidates_contains_required_patterns():
-    candidates = ssc.default_server_candidates()
+    candidates = ssc.default_server_candidates(host="09154936")
     expected_present = {
         r".\SQLEXPRESS",
+        r"09154936\SQLEXPRESS",
         r"localhost\SQLEXPRESS",
         r"(local)\SQLEXPRESS",
-        r"MOHANADLENOVO\SQLEXPRESS",
         r"lpc:.\SQLEXPRESS",
         r"np:\\.\pipe\MSSQL$SQLEXPRESS\sql\query",
         r"tcp:localhost,1433",
         r"tcp:127.0.0.1,1433",
     }
     assert expected_present.issubset(set(candidates))
+
+
+def test_default_server_candidates_uses_computername(monkeypatch):
+    monkeypatch.setenv("COMPUTERNAME", "09154936")
+    monkeypatch.setattr(ssc, "_sqlserver_original_machine_names", lambda: ())
+    candidates = ssc.default_server_candidates()
+    assert candidates[:4] == (
+        r".\SQLEXPRESS",
+        r"09154936\SQLEXPRESS",
+        r"localhost\SQLEXPRESS",
+        r"(local)\SQLEXPRESS",
+    )
+
+
+def test_default_server_candidates_uses_sqlserver_original_machine_name(monkeypatch):
+    monkeypatch.setenv("COMPUTERNAME", "RENAMEDBOX")
+    monkeypatch.setattr(ssc, "_sqlserver_original_machine_names", lambda: ("09154936",))
+    candidates = ssc.default_server_candidates()
+    assert candidates[:5] == (
+        r".\SQLEXPRESS",
+        r"RENAMEDBOX\SQLEXPRESS",
+        r"09154936\SQLEXPRESS",
+        r"localhost\SQLEXPRESS",
+        r"(local)\SQLEXPRESS",
+    )
+
+
+def test_default_named_instance_server_prefers_original_machine_name(monkeypatch):
+    monkeypatch.setenv("COMPUTERNAME", "RENAMEDBOX")
+    monkeypatch.setattr(ssc, "_sqlserver_original_machine_names", lambda: ("09154936",))
+    assert ssc.default_named_instance_server() == r"09154936\SQLEXPRESS"
 
 
 def test_default_server_candidates_orders_local_before_tcp():
@@ -164,18 +220,30 @@ def test_env_resolvers_honor_environment(monkeypatch):
     monkeypatch.setenv("MSSQL_SERVER", r".\SQLEXPRESS")
     monkeypatch.setenv("MSSQL_DRIVER", "ODBC Driver 17 for SQL Server")
     monkeypatch.setenv("MSSQL_DATABASE", "OtherDb")
+    monkeypatch.setenv("MSSQL_USER", "aac_app")
+    monkeypatch.setenv("MSSQL_PASSWORD", "secret")
     assert ssc.resolve_server_from_env() == r".\SQLEXPRESS"
     assert ssc.resolve_driver_from_env() == "ODBC Driver 17 for SQL Server"
     assert ssc.resolve_database_from_env() == "OtherDb"
+    assert ssc.resolve_sql_auth_from_env() == ("aac_app", "secret")
 
 
 def test_env_resolvers_fall_back_to_defaults(monkeypatch):
     monkeypatch.delenv("MSSQL_SERVER", raising=False)
     monkeypatch.delenv("MSSQL_DRIVER", raising=False)
     monkeypatch.delenv("MSSQL_DATABASE", raising=False)
+    monkeypatch.delenv("MSSQL_USER", raising=False)
+    monkeypatch.delenv("MSSQL_PASSWORD", raising=False)
     assert ssc.resolve_server_from_env(default="fallback") == "fallback"
     assert ssc.resolve_driver_from_env(default=None) is None
     assert ssc.resolve_database_from_env() == "ArabicAnalytics"
+    assert ssc.resolve_sql_auth_from_env() == (None, None)
+
+
+def test_sql_auth_env_requires_user_and_password(monkeypatch):
+    monkeypatch.setenv("MSSQL_USER", "aac_app")
+    monkeypatch.delenv("MSSQL_PASSWORD", raising=False)
+    assert ssc.resolve_sql_auth_from_env() == (None, None)
 
 
 # ---- Script importability -------------------------------------------------
@@ -209,3 +277,46 @@ def test_load_sqlserver_staging_script_imports_cleanly():
     )
     assert hasattr(mod, "main")
     assert mod.DEFAULT_STAGING == "dbo.bi_ready_clean"
+
+
+# ---- Tracked configuration docs ------------------------------------------
+def test_env_example_documents_sqlserver_auth_without_real_passwords():
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    text = env_example.read_text(encoding="utf-8")
+
+    assert "DATABASE_BACKEND=postgres" in text
+    assert "COMPILER_BACKEND=db" in text
+    assert "odbc_connect=" in text
+    assert "Trusted_Connection%3Dyes" in text
+    assert "UID%3D%3Csql_login%3E" in text
+    assert "PWD%3D%3Csql_password%3E" in text
+    assert "MSSQL_PASSWORD=<sql_password>" in text
+    assert "DB_PASSWORD=<postgres_password>" in text
+    assert "mssql+aioodbc://@." not in text
+    assert "mssql+pyodbc://@." not in text
+
+
+def test_sqlserver_migration_plan_uses_odbc_connect_examples():
+    plan = Path(__file__).resolve().parents[2] / "docs" / "SQLSERVER_MIGRATION_PLAN.md"
+    text = plan.read_text(encoding="utf-8")
+
+    assert "odbc_connect=" in text
+    assert "Trusted_Connection%3Dyes" in text
+    assert "UID%3D%3Csql_login%3E" in text
+    assert "PWD%3D%3Csql_password%3E" in text
+    assert "PYTHONIOENCODING" in text
+    assert "mssql+aioodbc://@." not in text
+    assert "mssql+pyodbc://@." not in text
+
+
+def test_tracked_docs_do_not_use_broken_sqlserver_netloc_urls():
+    root = Path(__file__).resolve().parents[2]
+    docs = [
+        root / "backend" / ".env.example",
+        root / "docs" / "SQLSERVER_MIGRATION_PLAN.md",
+        root / "docs" / "DATABASE_MIGRATION.md",
+    ]
+    for path in docs:
+        text = path.read_text(encoding="utf-8")
+        assert "mssql+aioodbc://@" not in text
+        assert "mssql+pyodbc://@" not in text

@@ -30,22 +30,101 @@ PREFERRED_DRIVERS: Tuple[str, ...] = (
 
 # Variations covering Windows named-instance / shared-memory / pipe /
 # TCP fallbacks. Tried in this order: cheap/local first, TCP last.
-def default_server_candidates(host: str = "MOHANADLENOVO", instance: str = "SQLEXPRESS") -> Tuple[str, ...]:
+def _current_windows_host() -> Optional[str]:
+    return (
+        os.environ.get("COMPUTERNAME")
+        or os.environ.get("HOSTNAME")
+        or None
+    )
+
+
+def _sqlserver_original_machine_names() -> Tuple[str, ...]:
+    """Return SQL Server's recorded machine names from the registry.
+
+    SQL Server named instances can keep the machine name that existed at
+    install time even after Windows is renamed. SSMS may therefore show
+    ``@@SERVERNAME`` that differs from ``COMPUTERNAME``.
+    """
+    try:
+        import winreg  # type: ignore[attr-defined]
+    except Exception:
+        return ()
+
+    root_path = r"SOFTWARE\Microsoft\Microsoft SQL Server"
+    names: List[str] = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, root_path)
+    except OSError:
+        return ()
+
+    try:
+        index = 0
+        while True:
+            try:
+                subkey = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            try:
+                machines = winreg.OpenKey(root, rf"{subkey}\Machines")
+                value, _value_type = winreg.QueryValueEx(machines, "OriginalMachineName")
+                if value:
+                    names.append(str(value))
+            except OSError:
+                continue
+    finally:
+        winreg.CloseKey(root)
+
+    return _dedupe_preserve_order(names)
+
+
+def _dedupe_preserve_order(items: Sequence[str]) -> Tuple[str, ...]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return tuple(out)
+
+
+def default_server_candidates(host: Optional[str] = None, instance: str = "SQLEXPRESS") -> Tuple[str, ...]:
     """Return ordered list of SERVER= strings to try.
 
     Tweaking host/instance keeps this useful for future deployments
-    without baking the developer machine name into tests.
+    without baking the developer machine name into tests. When ``host``
+    is omitted, the current Windows ``COMPUTERNAME`` is used.
     """
-    return (
+    hosts = [host] if host else [
+        _current_windows_host(),
+        *_sqlserver_original_machine_names(),
+    ]
+    candidates = [
         rf".\{instance}",
+    ]
+    for h in hosts:
+        if h:
+            candidates.append(rf"{h}\{instance}")
+    candidates.extend([
         rf"localhost\{instance}",
         rf"(local)\{instance}",
-        rf"{host}\{instance}",
         rf"lpc:.\{instance}",
         rf"np:\\.\pipe\MSSQL${instance}\sql\query",
         r"tcp:localhost,1433",
         r"tcp:127.0.0.1,1433",
-    )
+    ])
+    return _dedupe_preserve_order(candidates)
+
+
+def default_named_instance_server(instance: str = "SQLEXPRESS") -> str:
+    """Best default named-instance server for local smoke scripts.
+
+    Prefer SQL Server's original machine name when present because SSMS
+    and ``@@SERVERNAME`` can retain it after Windows is renamed.
+    """
+    host = next(iter(_sqlserver_original_machine_names()), None) or _current_windows_host()
+    return rf"{host}\{instance}" if host else rf".\{instance}"
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +149,8 @@ def build_connection_string(
     database: str = "ArabicAnalytics",
     *,
     trusted: bool = True,
+    user: Optional[str] = None,
+    password: Optional[str] = None,
     trust_server_cert: bool = True,
     encrypt: Optional[bool] = None,
 ) -> str:
@@ -98,7 +179,11 @@ def build_connection_string(
         f"SERVER={server}",
         f"DATABASE={database}",
     ]
-    if trusted:
+    use_sql_auth = bool(user and password)
+    if use_sql_auth:
+        parts.append(f"UID={user}")
+        parts.append(f"PWD={password}")
+    elif trusted:
         parts.append("Trusted_Connection=yes")
     if trust_server_cert:
         parts.append("TrustServerCertificate=yes")
@@ -106,6 +191,15 @@ def build_connection_string(
         parts.append("Encrypt=" + ("yes" if encrypt else "no"))
     # Single trailing ;.
     return ";".join(parts) + ";"
+
+
+def mask_password(conn_str: str) -> str:
+    """Mask password-like key/value pairs in an ODBC connection string."""
+    return re.sub(
+        r"(?i)(^|;)\s*(PWD|Password)\s*=\s*[^;]*",
+        lambda m: f"{m.group(1)}{m.group(2)}=***",
+        conn_str or "",
+    )
 
 
 def iter_connection_candidates(
@@ -222,18 +316,30 @@ def resolve_database_from_env(default: str = "ArabicAnalytics") -> str:
     return os.environ.get("MSSQL_DATABASE") or default
 
 
+def resolve_sql_auth_from_env() -> Tuple[Optional[str], Optional[str]]:
+    """Return SQL auth credentials only when both env vars are set."""
+    user = os.environ.get("MSSQL_USER")
+    password = os.environ.get("MSSQL_PASSWORD")
+    if user and password:
+        return user, password
+    return None, None
+
+
 __all__ = [
     "PREFERRED_DRIVERS",
     "ConnectionAttempt",
     "build_connection_string",
     "build_drop_if_exists",
     "build_staging_create_table",
+    "default_named_instance_server",
     "default_server_candidates",
     "iter_connection_candidates",
     "list_available_drivers",
+    "mask_password",
     "pick_available_driver",
     "resolve_database_from_env",
     "resolve_driver_from_env",
     "resolve_server_from_env",
+    "resolve_sql_auth_from_env",
     "sanitize_column_name",
 ]

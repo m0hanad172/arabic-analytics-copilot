@@ -413,7 +413,8 @@ Regression covered by
 ### What you need to run manually in SSMS to create ArabicAnalytics
 
 ```text
-1. Connect to MOHANADLENOVO\SQLEXPRESS with Windows authentication.
+1. Connect to .\SQLEXPRESS (or the server shown by SSMS) with Windows
+   authentication or SQL authentication.
 2. Open and execute, in order:
      backend/db/sqlserver/001_create_database.sql
      backend/db/sqlserver/002_create_schemas.sql       (after switching to ArabicAnalytics)
@@ -430,8 +431,11 @@ Regression covered by
 5. Set in backend/.env (NOT in .env.example):
      DATABASE_BACKEND=sqlserver
      COMPILER_BACKEND=python
-     DATABASE_URL=mssql+pyodbc://@MOHANADLENOVO%5CSQLEXPRESS/ArabicAnalytics?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes&TrustServerCertificate=yes
+     DATABASE_URL=mssql+aioodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BSERVER%3D.%5CSQLEXPRESS%3BDATABASE%3DArabicAnalytics%3BTrusted_Connection%3Dyes%3BTrustServerCertificate%3Dyes%3BEncrypt%3Dno%3B
 ```
+
+Use SQLAlchemy's `odbc_connect=` form for named instances. Do not use
+the older `mssql+...://@.%5CSQLEXPRESS/...` netloc style.
 
 ### What remains for Phase C4
 
