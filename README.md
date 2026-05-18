@@ -1,174 +1,152 @@
-﻿# Arabic Analytics Copilot (AAC) 
+# Arabic Analytics Copilot
 
-Arabic Analytics Copilot is an Arabic **Natural Language → SQL** BI assistant.  
-It converts Arabic questions into a validated analytics **plan**, compiles it into **guardrailed SQL**, executes on Postgres, and returns results to a modern React dashboard.
+Arabic Analytics Copilot is an Arabic natural-language-to-SQL BI assistant.
+It accepts Arabic business questions, compiles them into guarded analytics SQL,
+executes against the BI schema, and returns rows, SQL, plan metadata, cache
+status, and logs for review.
 
----
+The project is now SQL Server-first for company operation. PostgreSQL remains
+available as a fallback and legacy compatibility path until final approval.
 
-## Table of Contents
-1. Architecture Overview (Mental Model)
-2. Repo Layout (What matters)
-3. Database Model (bi / bi_meta)
-4. Roles & Permissions (copilot_ro vs copilot_loader)
-5. Running the Project (DB + Backend + Frontend)
-6. Restoring DB from Dump (safe path)
-7. Rebuilding DB from CSV (Phase4 bootstrap path)
-8. API Endpoints
-9. Ask Pipeline Internals (runner → plan → SQL → guardrails → execute → cache)
-10. Cache & Logs Internals (plan_cache / query_log)
-11. Arabic Encoding Notes (PowerShell gotchas)
-12. Testing & Diagnostics
-13. Common Failure Modes (and fixes)
+## Current Production Target
 
----
+- Operational database: Microsoft SQL Server
+- Target database name: `ArabicAnalytics`
+- Runtime schema: `bi`
+- Metadata schema: `bi_meta`
+- SQL Server runtime mode: `DATABASE_BACKEND=sqlserver`
+- SQL Server compiler mode: `COMPILER_BACKEND=python`
+- Temporary fallback mode: `DATABASE_BACKEND=postgres`, `COMPILER_BACKEND=db`
 
-# 1) Architecture Overview (Mental Model)
+Do not commit local `.env` files or real passwords. Keep `backend/.env` local.
 
-**Frontend (React/Vite)**
-- Sends `question` to backend `/api/ask`
-- Displays table + filters + export + charts
-- Has client-side utilities (CSV export, time utils, etc.)
+## Repository Layout
 
-**Backend (FastAPI)**
-- Receives request → builds plan → compiles SQL → guardrails → executes → returns rows + meta
-- Optionally uses Gemini LLM for planning (when enabled)
-- Exposes API docs at `/docs`
+- `backend/app/`: FastAPI backend, SQL guardrails, compiler, catalog loader, DB adapter
+- `backend/db/sqlserver/`: SQL Server schema and seed scripts
+- `scripts/test_sqlserver_connection.py`: SQL Server connection probe
+- `scripts/load_sqlserver_staging.py`: CSV loader for SQL Server staging/runtime data
+- `scripts/smoke_sqlserver_ask.py`: SQL Server `/api/ask` smoke test
+- `frontend/`: React/Vite dashboard
+- `data/clean/bi_ready_clean.csv`: prepared BI CSV
+- `docs/SQLSERVER_MIGRATION_PLAN.md`: migration status and phase notes
+- `docs/DATABASE_MIGRATION.md`: backend database migration details
+- `docs/PHASE_C_PLAN.md`: Phase C compiler and SQL Server plan
 
-**Database (Postgres)**
-- `bi` schema: fact table + safe views used at runtime
-- `bi_meta` schema: semantic layer (metrics/dimensions/synonyms) + SQL compiler + cache tables
+## SQL Server Setup
 
----
+Install these prerequisites on the Windows host:
 
-# 2) Repo Layout (What matters)
+- SQL Server Express or SQL Server Developer Edition
+- SQL Server Management Studio, recommended for initial setup
+- ODBC Driver 18 for SQL Server
+- Python virtual environment dependencies from `backend/requirements.txt`
 
-Top-level “important” items:
-- `compose.db.yml` : DB-only compose
-- `db/` : contains `db_dump.sql` (full dump used for restore)
-- `scripts/restore_db.ps1` : restore script
-- `request_test.py` : Arabic-safe API test (recommended)
-- `backend/.env.example` and `frontend/.env.example` : environment templates
-- Backend core files:
-  - `backend/app/main.py` (app entry)
-  - `backend/app/core/config.py` (settings)
-  - `backend/app/core/sql_guardrails.py` (SQL safety)
-  - `backend/app/services/ask/runner.py` (main ask pipeline)
-- Frontend core files:
-  - `frontend/src/services/askApi.ts` (API client)
-  - `frontend/src/store/useAskStore.ts` (state)
-  - `frontend/src/app/layout/App.tsx` + `src/App.tsx` (UI entry)
-
-⚠️ Do NOT commit:
-- `frontend/node_modules/` (huge)
-- `.venv/`
-- `backend/.env` and `frontend/.env` (secrets / local values)
-Keep only `*.env.example` tracked.
-
----
-
-# 3) Database Model (bi / bi_meta)
-
-## 3.1 bi schema (runtime data)
-- Runtime queries should target safe view(s), mainly:
-  - `bi.vw_fact_sales_line_clean`
-- Fact table exists (demo dataset):
-  - `bi.fact_sales_line`
-
-## 3.2 bi_meta schema (semantic layer + runtime helpers)
-Tables:
-- `bi_meta.metrics`:
-  - `metric_key`, `display_name_ar`, `display_name_en`, `agg`, `sql_expression`, `data_type`
-- `bi_meta.dimensions`:
-  - `dim_key`, `display_name_ar/en`, `sql_expression`, etc.
-- `bi_meta.synonyms`:
-  - Maps Arabic terms → canonical keys
-
-Functions:
-- `bi_meta.get_catalog()` and `bi_meta.get_catalog('bi')`:
-  - Returns semantic catalog JSON consumed by backend
-- `bi_meta.compile_query(plan jsonb)`:
-  - Plan → SQL (SELECT-only)
-- `bi_meta.run_query(plan jsonb)`:
-  - Executes compiled SQL and returns rows JSON
-
----
-
-# 4) Roles & Permissions (Security model)
-
-We use two DB users (principle of least privilege):
-
-- `copilot_loader` (Write / bootstrap user)
-  - Used for initial load, schema build, seeding
-  - Needs CREATE/INSERT permissions
-
-- `copilot_ro` (Read-only runtime user)
-  - Used by backend during normal operation
-  - Should have SELECT on safe views + EXECUTE on catalog/compiler functions
-  - Should NOT have DROP/UPDATE/DELETE privileges (reduces risk even if LLM goes wrong)
-
----
-
-# 5) Running the Project (DB + Backend + Frontend)
-
-## 5.1 Start Postgres (Docker)
-```powershell
-# Start DB in background
-docker compose -f compose.db.yml -p aac up -d
-
-# Check it is accepting connections
-docker exec -it aac-pg pg_isready -U postgres -d arabic_analytics
-````
-
-### Container name conflict (only if DB already running)
-
-If you see: `container name "/aac-pg" is already in use`
-
-* That means Postgres is already running → you can skip “start DB”.
-* Or restart it safely (no volume deletion):
+Create or verify the database with SQL Server Management Studio or `sqlcmd`.
+The schema scripts are idempotent and should be applied in order:
 
 ```powershell
-docker stop aac-pg
-docker rm aac-pg
-docker compose -f compose.db.yml -p aac up -d
+sqlcmd -S .\SQLEXPRESS -E -i .\backend\db\sqlserver\001_create_database.sql
+sqlcmd -S .\SQLEXPRESS -E -d ArabicAnalytics -i .\backend\db\sqlserver\002_create_schemas.sql
+sqlcmd -S .\SQLEXPRESS -E -d ArabicAnalytics -i .\backend\db\sqlserver\003_create_bi_objects.sql
+sqlcmd -S .\SQLEXPRESS -E -d ArabicAnalytics -i .\backend\db\sqlserver\004_create_bi_meta_objects.sql
+sqlcmd -S .\SQLEXPRESS -E -d ArabicAnalytics -i .\backend\db\sqlserver\005_seed_bi_meta.sql
 ```
 
-⚠️ DO NOT use `down -v` and DO NOT prune volumes unless you want to delete the DB.
+If using SQL Authentication instead of Windows Authentication, enable SQL
+Server Mixed Mode and create an application login with read/write access to
+`ArabicAnalytics`. Keep the password only in the local shell or local
+`backend/.env`.
 
-## 5.2 Backend (local dev)
+## SQL Server Environment
+
+The helper scripts read `MSSQL_*` variables. SQL Authentication is used only
+when both `MSSQL_USER` and `MSSQL_PASSWORD` are present; otherwise Windows
+Trusted Connection is used.
+
+Windows Authentication example:
 
 ```powershell
-# Create venv (once)
-python -m venv .venv
-
-# Activate
-.\.venv\Scripts\Activate.ps1
-
-# Install deps
-pip install -r backend\requirements.txt
-
-# Create env file from template
-Copy-Item backend\.env.example backend\.env
+$env:MSSQL_SERVER=".\SQLEXPRESS"
+$env:MSSQL_DRIVER="ODBC Driver 18 for SQL Server"
+$env:MSSQL_DATABASE="ArabicAnalytics"
+$env:PYTHONIOENCODING="utf-8"
 ```
 
-Edit `backend\.env`:
+SQL Authentication example:
+
+```powershell
+$env:MSSQL_SERVER=".\SQLEXPRESS"
+$env:MSSQL_DRIVER="ODBC Driver 18 for SQL Server"
+$env:MSSQL_DATABASE="ArabicAnalytics"
+$env:MSSQL_USER="<sql_login>"
+$env:MSSQL_PASSWORD="<sql_password>"
+$env:PYTHONIOENCODING="utf-8"
+```
+
+`PYTHONIOENCODING=utf-8` avoids Arabic text rendering as question marks in
+some Windows PowerShell sessions.
+
+For SQLAlchemy, use the `odbc_connect=` URL form for SQL Server named
+instances. Do not use the broken netloc form such as
+`mssql+aioodbc://@.%5CSQLEXPRESS/...`.
+
+Example shape:
 
 ```env
-DATABASE_URL=postgresql+asyncpg://copilot_ro:123@localhost:5432/arabic_analytics
-ALLOWED_SCHEMA=bi
-SQL_ALLOWED_SCHEMAS=bi
+DATABASE_URL=mssql+aioodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BSERVER%3D.%5CSQLEXPRESS%3BDATABASE%3DArabicAnalytics%3BTrusted_Connection%3Dyes%3BTrustServerCertificate%3Dyes%3BEncrypt%3Dno%3B
 ```
 
-Run:
+See `backend/.env.example` for placeholder-only examples for both Windows
+Authentication and SQL Authentication.
+
+## Load The CSV
+
+After the SQL Server schema exists, load the clean BI CSV:
 
 ```powershell
-uvicorn backend.app.main:app --reload --port 8000
+.\.venv\Scripts\python.exe scripts\load_sqlserver_staging.py
+```
+
+The expected company smoke baseline is 5000 rows in:
+
+- `dbo.bi_ready_clean`
+- `bi.fact_sales_line`
+
+## Run The Backend
+
+Create and install the Python environment:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+```
+
+Set the SQL Server runtime mode locally:
+
+```powershell
+$env:DATABASE_BACKEND="sqlserver"
+$env:COMPILER_BACKEND="python"
+$env:MSSQL_SERVER=".\SQLEXPRESS"
+$env:MSSQL_DRIVER="ODBC Driver 18 for SQL Server"
+$env:MSSQL_DATABASE="ArabicAnalytics"
+```
+
+If using SQL Authentication, also set `MSSQL_USER` and `MSSQL_PASSWORD` in
+the local shell.
+
+Run FastAPI:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload --port 8000
 ```
 
 API docs:
 
-* [http://localhost:8000/docs](http://localhost:8000/docs)
+- http://localhost:8000/docs
 
-## 5.3 Frontend (Vite)
+## Run The Frontend
 
 ```powershell
 cd frontend
@@ -176,169 +154,108 @@ npm install
 npm run dev
 ```
 
-UI:
+The Vite app runs at:
 
-* [http://localhost:3000](http://localhost:3000)
+- http://localhost:3000
 
----
+## Smoke Tests
 
-# 6) Restoring DB from Dump (safe path for new machines)
+Probe SQL Server connectivity:
 
-This repo includes:
+```powershell
+python scripts/test_sqlserver_connection.py
+```
 
-* `db/db_dump.sql` (full DB: schemas + functions + data)
+Run the SQL Server `/api/ask` smoke:
 
-Restore:
+```powershell
+python scripts/smoke_sqlserver_ask.py
+```
+
+The smoke should confirm:
+
+- `/api/health` returns 200
+- `/api/ask` returns 200 for the Arabic test questions
+- `meta.compiler_backend` is `python`
+- `meta.catalog_source` is `sqlserver_tables`
+- `meta.skipped_for_sqlserver` is `None`
+- a `query_log` id is returned
+- `plan_cache` reuse reports `used_cache=True`
+
+Focused backend tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest backend/tests/test_sqlserver_connect.py backend/tests/test_ask_cache_log.py backend/tests/test_ask_compiler_backend.py backend/tests/test_sqlserver_live_ask.py -q
+```
+
+Optional live SQL Server pytest:
+
+```powershell
+$env:SQLSERVER_LIVE="1"
+.\.venv\Scripts\python.exe -m pytest backend/tests/test_sqlserver_live_ask.py -q
+```
+
+Full pytest may require the legacy PostgreSQL Docker database. If full pytest
+fails only with `127.0.0.1:5432` connection errors, treat that as a missing
+PostgreSQL fallback environment, not a SQL Server regression.
+
+## PostgreSQL Fallback
+
+PostgreSQL is still present for fallback and historical compatibility. The
+defaults in `backend/.env.example` intentionally remain:
+
+```env
+DATABASE_BACKEND=postgres
+COMPILER_BACKEND=db
+```
+
+Start the PostgreSQL Docker fallback when needed:
+
+```powershell
+docker compose -f compose.db.yml -p aac up -d
+```
+
+Restore the legacy dump:
 
 ```powershell
 docker exec -i aac-pg psql -U postgres -d arabic_analytics < db/db_dump.sql
 ```
 
-Or use the script:
+Do not remove PostgreSQL code or migration files until the final SQL
+Server-only approval is given.
 
-```powershell
-.\scripts\restore_db.ps1
-```
+## Troubleshooting
 
-Verify:
+Connection fails with SQL Authentication:
 
-```powershell
-docker exec -it aac-pg psql -U postgres -d arabic_analytics -c "\dn"
-docker exec -it aac-pg psql -U postgres -d arabic_analytics -c "select count(*) from bi.fact_sales_line;"
-```
+- Confirm SQL Server Mixed Mode is enabled.
+- Confirm the login maps to `ArabicAnalytics`.
+- Confirm the login has at least `db_datareader` and `db_datawriter`.
+- Run `python scripts/test_sqlserver_connection.py`.
 
----
+Connection fails with Windows Authentication:
 
-# 7) Rebuilding DB from CSV (Phase4 bootstrap path)
+- Try setting `MSSQL_SERVER` to `.\SQLEXPRESS`, `{COMPUTERNAME}\SQLEXPRESS`,
+  `localhost\SQLEXPRESS`, or `(local)\SQLEXPRESS`.
+- The prober also tries named pipe and TCP fallbacks.
 
-Alternative to dump restore (useful for dev/experiments):
+ODBC driver not found:
 
-* Copy CSV into container (path expected by bootstrap)
-* Run:
+- Install ODBC Driver 18 for SQL Server.
+- Confirm `MSSQL_DRIVER="ODBC Driver 18 for SQL Server"`.
 
-  * `backend/app/db/db_bootstrap.sql`
-  * `backend/app/db/phase4_db_bootstrap.sql`
-* There is also a helper script under `tools/restore_phase4.ps1` (advanced).
+Arabic appears as `????`:
 
-(If you don’t need rebuild, prefer dump restore — faster and consistent.)
+- Set `$env:PYTHONIOENCODING="utf-8"`.
+- Prefer the Python smoke scripts over ad-hoc PowerShell JSON bodies.
 
----
+Named instance URL fails:
 
-# 8) API Endpoints (Backend routes)
+- Use SQLAlchemy `odbc_connect=`.
+- Avoid `mssql+aioodbc://@.%5CSQLEXPRESS/...`.
 
-Main API routes exist under `backend/app/api/routes/`:
+Docker/PostgreSQL tests fail:
 
-* `ask` (core endpoint)
-* `health`
-* `schema`
-* `query`
-* `logs`
-* `eval`
-* `transcribe` (if enabled)
-
----
-
-# 9) Ask Pipeline Internals (High-level)
-
-When calling `/api/ask`:
-
-1. Normalize question (Arabic-safe normalization)
-2. Load catalog from `bi_meta.get_catalog()` (DB function)
-3. Decide cache hit/miss for plan (plan_cache)
-4. Build plan:
-
-   * Rule-based planner (default)
-   * Optional LLM planner (if enabled)
-5. Compile plan → SQL (bi_meta.compile_query or internal compiler)
-6. Guardrails validate SQL (single statement, SELECT-only rules)
-7. Execute SQL
-8. Return:
-
-   * plan
-   * SQL
-   * rows
-   * meta: timings, cache info, catalog hash/source
-
----
-
-# 10) Cache & Logs Internals
-
-* `bi_meta.plan_cache`:
-
-  * Unique key typically based on normalized question + catalog_hash
-  * Allows repeated questions to be fast
-* `bi_meta.query_log`:
-
-  * Stores question + plan + SQL + row_count + timings
-  * Useful for debugging and evaluation
-
----
-
-# 11) Arabic Encoding Notes (PowerShell gotchas)
-
-PowerShell sometimes corrupts Arabic JSON requests and shows `????`.
-
-Recommended: use the included Python test:
-
-```powershell
-python request_test.py
-```
-
-Alternative: PowerShell UTF-8 bytes request:
-
-```powershell
-$api = "http://localhost:8000/api"
-$payload = @{ question="اعرض صافي المبيعات حسب المدينة واعرض أعلى 5"; use_cache=1; use_llm=0 }
-$json  = $payload | ConvertTo-Json -Depth 6
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-Invoke-RestMethod "$api/ask" -Method Post -ContentType "application/json; charset=utf-8" -Body $bytes
-```
-
----
-
-# 12) Testing & Diagnostics
-
-* Run tests (backend):
-
-```powershell
-pytest -q
-```
-
-* Quick DB check:
-
-```powershell
-docker exec -it aac-pg psql -U postgres -d arabic_analytics -c "select count(*) from bi.fact_sales_line;"
-docker exec -it aac-pg psql -U postgres -d arabic_analytics -c "select bi_meta.get_catalog('bi');"
-```
-
-* API sanity test:
-
-```powershell
-python request_test.py
-```
-
----
-
-# 13) Common Failure Modes (and fixes)
-
-## A) DB deleted / missing data
-
-Cause: running `docker compose down -v` or prune volumes.
-Fix: start DB and restore from `db/db_dump.sql`.
-
-## B) `ModuleNotFoundError: psycopg2`
-
-Cause: DATABASE_URL not using asyncpg.
-Fix: set:
-`postgresql+asyncpg://...`
-
-## C) Container name conflict
-
-Cause: `aac-pg` already running.
-Fix: skip starting DB OR stop/remove container (without volume deletion).
-
-## D) Arabic appears as `????`
-
-Cause: request encoding in PowerShell.
-Fix: `request_test.py` or UTF-8 bytes request.
-
+- Start the fallback database only when running legacy PostgreSQL tests.
+- SQL Server C5 readiness is covered by the focused SQL Server tests and
+  smoke scripts above.
