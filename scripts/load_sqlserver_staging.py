@@ -38,10 +38,12 @@ from backend.app.db.sqlserver_connect import (  # noqa: E402
     build_drop_if_exists,
     build_staging_create_table,
     list_available_drivers,
+    mask_password,
     pick_available_driver,
     resolve_database_from_env,
     resolve_driver_from_env,
     resolve_server_from_env,
+    resolve_sql_auth_from_env,
     sanitize_column_name,
 )
 
@@ -127,15 +129,19 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     driver, server = _resolve_driver_and_server(args)
     encrypt_flag = args.encrypt == "yes"
+    sql_user, sql_password = resolve_sql_auth_from_env()
     conn_str = build_connection_string(
         driver, server,
         database=args.database, trusted=True,
+        user=sql_user,
+        password=sql_password,
         trust_server_cert=True, encrypt=encrypt_flag,
     )
     _print(f"Driver: {driver}")
     _print(f"Server: {server}")
     _print(f"Database: {args.database}")
-    _print(f"Connection string: {conn_str}")
+    _print(f"Authentication: {'SQL auth' if sql_user and sql_password else 'Windows trusted'}")
+    _print(f"Connection string: {mask_password(conn_str)}")
 
     df = _load_csv_dataframe(Path(args.csv))
     _print(f"CSV rows:    {len(df)}")

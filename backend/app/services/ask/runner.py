@@ -17,7 +17,6 @@ from backend.app.db.adapter import (
     controlled_backend_error_message,
     ensure_json_obj as _ensure_json_obj,
     fetch_select,
-    is_postgres,
     is_sqlserver,
     normalize_database_url_for_asyncpg as _asyncpg_dsn,
     pg_fetch,
@@ -29,7 +28,13 @@ from backend.app.services.ask.compile import (
     compile_for_request,
 )
 from backend.app.services.ask.catalog import _augment_catalog
-from backend.app.services.ask.cache import _normalize_question, _cache_get_plan, _cache_upsert_plan
+from backend.app.services.ask.cache import _normalize_question
+from backend.app.services.ask.cache_log import (
+    get_cached_plan,
+    insert_query_log,
+    touch_cached_plan,
+    upsert_cached_plan,
+)
 from backend.app.services.ask.plan_normalize import finalize_plan
 
 from backend.app.services.ask.llm_client import (
@@ -152,22 +157,6 @@ def _catalog_hash(catalog: dict) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
-
-
-async def _cache_touch(cache_id: int) -> None:
-    try:
-        await _db_fetchval(
-            """
-            UPDATE bi_meta.plan_cache
-            SET hits = COALESCE(hits, 0) + 1,
-                last_used_at = now()
-            WHERE id = $1
-            RETURNING id;
-            """,
-            int(cache_id),
-        )
-    except Exception:
-        pass
 
 
 # robust trailing cleanup (handles ;; + whitespace + some bidi marks)
@@ -539,9 +528,9 @@ async def ask(
     if not str(question).strip():
         raise HTTPException(status_code=422, detail="question is required")
 
-    # Phase C2: only the *db* compiler path requires PostgreSQL. The
-    # *python* compiler can serve SQL Server end-to-end (catalog/cache/
-    # log still PG-only — those are skipped on SQL Server below).
+    # Phase C5: only the *db* compiler path requires PostgreSQL. The
+    # *python* compiler can serve SQL Server end-to-end, including the
+    # portable cache/log side channels.
     compiler_backend = active_compiler_backend()
     if is_sqlserver() and compiler_backend == "db":
         raise HTTPException(
@@ -565,14 +554,22 @@ async def ask(
     llm_mode_norm = (llm_mode or "").strip().lower()
 
 
-    # 1) cache (PostgreSQL-only: bi_meta.plan_cache uses ON CONFLICT)
-    if use_cache and is_postgres():
-        cached = await _cache_get_plan(q_norm, c_hash, _db_fetchrow, _ensure_json_obj)
+    # 1) cache
+    if use_cache:
+        cached = await get_cached_plan(
+            q_norm,
+            c_hash,
+            pg_fetchrow_func=_db_fetchrow,
+            ensure_json_func=_ensure_json_obj,
+        )
         if cached and cached.get("plan"):
             plan = cached["plan"]
             used_cache = True
             if cached.get("id") is not None:
-                await _cache_touch(int(cached["id"]))
+                await touch_cached_plan(
+                    int(cached["id"]),
+                    pg_fetchval_func=_db_fetchval,
+                )
 
     # 2) optional LLM
     llm_ms: Optional[int] = None
@@ -713,17 +710,22 @@ async def ask(
         max_rows_cap=int(os.getenv("MAX_ROWS_CAP", "5000")),
     )
 
-    # cache if newly generated (PostgreSQL-only)
+    # cache if newly generated
     skipped_for_sqlserver: List[str] = []
-    if use_cache and not used_cache and is_postgres():
+    if use_cache and not used_cache:
         if used_llm and llm_mode_norm == "mock":
             model_name = "mock"
         else:
             model_name = GEMINI_MODEL if used_llm else "rule_based"
 
-        await _cache_upsert_plan(q_norm, str(question), c_hash, plan, model_name, _db_fetchval)
-    elif use_cache and not is_postgres():
-        skipped_for_sqlserver.append("plan_cache")
+        await upsert_cached_plan(
+            q_norm,
+            str(question),
+            c_hash,
+            plan,
+            model_name,
+            pg_fetchval_func=_db_fetchval,
+        )
 
 
     # compile -> guardrails -> execute
@@ -814,34 +816,19 @@ async def ask(
         else None
     )
 
-    log_id = None
-    # bi_meta.query_log uses jsonb + asyncpg placeholders; PG-only for now.
-    if is_postgres():
-        try:
-            log_id = await _db_fetchval(
-                """
-                INSERT INTO bi_meta.query_log(
-                    question, plan, sql, row_count, warnings, suggestions, duration_ms,
-                    used_cache, used_llm, explain_used
-                )
-                VALUES ($1, $2::jsonb, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
-                RETURNING id;
-                """,
-                str(question),
-                json.dumps(plan, ensure_ascii=False),
-                safe_sql,
-                len(rows),
-                json.dumps(warnings_all, ensure_ascii=False),
-                json.dumps(suggestions, ensure_ascii=False),
-                duration_ms,
-                bool(used_cache),
-                bool(used_llm),
-                bool(explain),
-            )
-        except Exception:
-            pass
-    else:
-        skipped_for_sqlserver.append("query_log")
+    log_id = await insert_query_log(
+        question=str(question),
+        plan=plan,
+        sql=safe_sql,
+        row_count=len(rows),
+        warnings=warnings_all,
+        suggestions=suggestions,
+        duration_ms=duration_ms,
+        used_cache=bool(used_cache),
+        used_llm=bool(used_llm),
+        explain_used=bool(explain),
+        pg_fetchval_func=_db_fetchval,
+    )
 
     return {
         "question": str(question),

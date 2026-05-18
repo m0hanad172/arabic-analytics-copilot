@@ -8,28 +8,27 @@ code changes do.
 
 | | |
 |---|---|
-| Server instance | `MOHANADLENOVO\SQLEXPRESS` |
+| Server instance | `.\SQLEXPRESS` or `<COMPUTERNAME>\SQLEXPRESS` |
 | Database | `ArabicAnalytics` |
 | Schemas | `bi`, `bi_meta` |
-| Connection style | Windows trusted (integrated security) |
-| ODBC driver | `ODBC Driver 17 for SQL Server` (preferred) or `ODBC Driver 18 for SQL Server` |
+| Connection style | Windows trusted auth, or SQL auth when Mixed Mode is enabled |
+| ODBC driver | `ODBC Driver 18 for SQL Server` or `ODBC Driver 17 for SQL Server` |
 
 Example SQLAlchemy URL (used by `backend/.env.example`):
 
 ```env
 DATABASE_BACKEND=sqlserver
 COMPILER_BACKEND=python
-DATABASE_URL=mssql+pyodbc://@MOHANADLENOVO%5CSQLEXPRESS/ArabicAnalytics?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes&TrustServerCertificate=yes
+DATABASE_URL=mssql+aioodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BSERVER%3D.%5CSQLEXPRESS%3BDATABASE%3DArabicAnalytics%3BTrusted_Connection%3Dyes%3BTrustServerCertificate%3Dyes%3BEncrypt%3Dno%3B
 ```
 
-`%5C` is URL-encoded `\`. If you have Driver 18 installed, swap to
-`driver=ODBC+Driver+18+for+SQL+Server`. Driver 18 enables encryption by
-default; keep `TrustServerCertificate=yes` for a local dev box that has
-no signed certificate.
+Always use SQLAlchemy's `odbc_connect=` form for SQL Server named
+instances. Do **not** use the old `mssql+...://@.%5CSQLEXPRESS/...`
+netloc style: aioodbc can pass the literal `%5C` through to pyodbc,
+which breaks named-instance resolution.
 
-The async path uses `aioodbc` (`mssql+aioodbc://...`). Phase C3 does
-**not** add `aioodbc` as a hard dependency; install it locally before
-exercising the live SQL Server runtime:
+The async path uses `aioodbc` (`mssql+aioodbc://...`). Install the SQL
+Server Python drivers locally before exercising the live runtime:
 
 ```powershell
 pip install aioodbc pyodbc
@@ -91,7 +90,8 @@ regenerate with the helper script described below).
 ## How to apply the SQL Server scripts (SSMS)
 
 1. Open SQL Server Management Studio (SSMS).
-2. Connect to `MOHANADLENOVO\SQLEXPRESS` with Windows authentication.
+2. Connect to `.\SQLEXPRESS` (or the server name shown by SSMS) with
+   Windows authentication or SQL authentication.
 3. Open and execute the scripts in order from
    `backend/db/sqlserver/`:
 
@@ -117,27 +117,31 @@ regenerate with the helper script described below).
    pip install aioodbc pyodbc
    ```
 
-6. Set the SQL Server URL in `backend/.env`:
+6. Set the SQL Server URL in `backend/.env` using `odbc_connect=`.
+   `backend/.env` is gitignored and **must not** be committed.
 
    ```env
    DATABASE_BACKEND=sqlserver
    COMPILER_BACKEND=python
-   DATABASE_URL=mssql+pyodbc://@MOHANADLENOVO%5CSQLEXPRESS/ArabicAnalytics?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes&TrustServerCertificate=yes
+   DATABASE_URL=mssql+aioodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BSERVER%3D.%5CSQLEXPRESS%3BDATABASE%3DArabicAnalytics%3BTrusted_Connection%3Dyes%3BTrustServerCertificate%3Dyes%3BEncrypt%3Dno%3B
    ```
 
-   Note: `backend/.env` is gitignored and **must not** be committed.
-   Use `backend/.env.example` as the template only.
+   For SQL authentication, enable Mixed Mode in SQL Server and use
+   `UID`/`PWD` placeholders in the ODBC string. Keep the real password
+   local only:
+
+   ```env
+   DATABASE_URL=mssql+aioodbc:///?odbc_connect=DRIVER%3D%7BODBC+Driver+18+for+SQL+Server%7D%3BSERVER%3D.%5CSQLEXPRESS%3BDATABASE%3DArabicAnalytics%3BUID%3D%3Csql_login%3E%3BPWD%3D%3Csql_password%3E%3BTrustServerCertificate%3Dyes%3BEncrypt%3Dno%3B
+   ```
 
 7. Boot the backend (`uvicorn ...`) and try `/ask` with a question
-   that only uses supported metrics/dimensions. `plan_cache` /
-   `query_log` writes are silently skipped on SQL Server until
-   Phase C4 ships the portable upsert/insert.
+   that only uses supported metrics/dimensions.
 
 ## SQL Server Express connection troubleshooting (Phase C4 hotfix)
 
-SSMS connecting fine while pyodbc fails almost always means a named-instance
-discovery / protocol problem, not a credentials problem. Work through this
-list before changing connection strings:
+SSMS connecting fine while pyodbc fails often means a named-instance
+discovery, protocol, encryption, or authentication-mode problem. Work
+through this list before changing application code:
 
 ### 1. SQL Server Browser
 
@@ -185,10 +189,30 @@ The Phase C4 connection-string builder
 `TrustServerCertificate=yes` by default and lets the caller opt into
 `Encrypt=`.
 
-### 6. Probe scripts
+### 6. SQL authentication / Mixed Mode
+
+If Windows `Trusted_Connection` fails from pyodbc/aioodbc with a
+security-package error, SQL authentication is a valid local smoke path.
+Enable Mixed Mode in SQL Server, create a least-privilege login/user for
+`ArabicAnalytics`, and grant `db_datareader` / `db_datawriter`. Store
+the password only in your local shell or gitignored `.env`; never commit
+it. The helper scripts use SQL auth only when both `MSSQL_USER` and
+`MSSQL_PASSWORD` are set, and they mask `PWD` in printed connection
+strings.
+
+### 7. Probe scripts
 
 ```powershell
 # Walk through driver/server combos and print the working one.
+$env:PYTHONIOENCODING = "utf-8"       # helps PowerShell print Arabic safely
+python scripts/test_sqlserver_connection.py
+
+# Optional SQL auth path. Set the password locally; do not commit it.
+$env:MSSQL_SERVER = ".\SQLEXPRESS"
+$env:MSSQL_DRIVER = "ODBC Driver 18 for SQL Server"
+$env:MSSQL_DATABASE = "ArabicAnalytics"
+$env:MSSQL_USER = "<sql_login>"
+$env:MSSQL_PASSWORD = "<sql_password>"
 python scripts/test_sqlserver_connection.py
 
 # Once a combo works, stage the CSV into dbo.bi_ready_clean:
@@ -203,23 +227,29 @@ Environment overrides accepted by both scripts:
 | `MSSQL_SERVER` | `SERVER=` value (e.g. `.\SQLEXPRESS`, `tcp:localhost,1433`). |
 | `MSSQL_DRIVER` | ODBC driver display name. Defaults to highest-priority installed. |
 | `MSSQL_DATABASE` | Target database (default: `ArabicAnalytics`). |
+| `MSSQL_USER` | Optional SQL-auth login. Requires `MSSQL_PASSWORD`. |
+| `MSSQL_PASSWORD` | Optional SQL-auth password. Masked in script output; keep local only. |
 
-### 7. Connection-string patterns tried by the probe
+### 8. Connection-string patterns tried by the probe
 
 In priority order (cheap/local first, then TCP fallbacks):
 
 ```
 .\SQLEXPRESS
+<COMPUTERNAME>\SQLEXPRESS
+<SQL Server OriginalMachineName>\SQLEXPRESS
 localhost\SQLEXPRESS
 (local)\SQLEXPRESS
-MOHANADLENOVO\SQLEXPRESS
 lpc:.\SQLEXPRESS
 np:\\.\pipe\MSSQL$SQLEXPRESS\sql\query
 tcp:localhost,1433
 tcp:127.0.0.1,1433
 ```
 
-### 8. Moving staged rows into `bi.fact_sales_line`
+`OriginalMachineName` covers renamed Windows machines where SSMS and
+`@@SERVERNAME` still report the name SQL Server had at install time.
+
+### 9. Moving staged rows into `bi.fact_sales_line`
 
 After `dbo.bi_ready_clean` is populated, run this once in SSMS to copy
 the columns that match `bi.fact_sales_line`:
@@ -271,12 +301,12 @@ FROM dbo.bi_ready_clean;
 parsed, which is what we want — the Phase C3 ALTER block already made
 every business column nullable.
 
-## Phase C4 live SQL Server smoke test
+## Phase C5 live SQL Server smoke test
 
-**Date verified:** Phase C4 hotfix. Backend: `MOHANADLENOVO\SQLEXPRESS`,
-database `ArabicAnalytics`, drivers visible to pyodbc: Driver 18, Native
-Client 11.0, "SQL Server". Tested end-to-end with the in-process
-TestClient in `scripts/smoke_sqlserver_ask.py`.
+**Date verified:** Phase C5. Backend: `.\SQLEXPRESS` / local
+`SQLEXPRESS`, database `ArabicAnalytics`, driver `ODBC Driver 18 for SQL
+Server`. Tested end-to-end with the in-process TestClient in
+`scripts/smoke_sqlserver_ask.py`.
 
 ### Working SERVER pattern
 
@@ -285,6 +315,21 @@ DRIVER={ODBC Driver 18 for SQL Server}
 SERVER=.\SQLEXPRESS
 DATABASE=ArabicAnalytics
 Trusted_Connection=yes
+TrustServerCertificate=yes
+Encrypt=no
+```
+
+### Working SQL-auth pattern
+
+Use this when Mixed Mode is enabled and a database user has
+`db_datareader` / `db_datawriter`. Keep the real password local only.
+
+```
+DRIVER={ODBC Driver 18 for SQL Server}
+SERVER=.\SQLEXPRESS
+DATABASE=ArabicAnalytics
+UID=<sql_login>
+PWD=<sql_password>
 TrustServerCertificate=yes
 Encrypt=no
 ```
@@ -384,7 +429,7 @@ After the corrected re-run:
 
 All three returned HTTP 200, `meta.compiler_backend = "python"`,
 `meta.catalog_source = "sqlserver_tables"`, and
-`meta.skipped_for_sqlserver = ["query_log"]`. No asyncpg call, no
+`meta.skipped_for_sqlserver = None`. No asyncpg call, no
 `bi_meta.compile_query` call.
 
 | Question | Rows | Generated SQL |
@@ -402,14 +447,32 @@ Sanity checks on the first response:
 
 ```powershell
 pip install aioodbc pyodbc
+$env:MSSQL_SERVER = ".\SQLEXPRESS"
+$env:MSSQL_DRIVER = "ODBC Driver 18 for SQL Server"
+$env:MSSQL_DATABASE = "ArabicAnalytics"
+# Optional SQL-auth path. Set these only in your local shell.
+$env:MSSQL_USER = "<sql_login>"
+$env:MSSQL_PASSWORD = "<sql_password>"
 $env:PYTHONIOENCODING = "utf-8"
 python scripts/smoke_sqlserver_ask.py
 ```
 
-The script sets the SQL Server env overrides in-process via
-`os.environ`, mounts the FastAPI app with `TestClient`, and prints the
-emitted SQL + the `meta` block for each question. It does not touch
-`backend/.env`.
+`PYTHONIOENCODING=utf-8` avoids Windows PowerShell `cp1252` print
+errors when the script prints Arabic questions. The script sets the app
+backend/compiler overrides in-process via `os.environ`, mounts the
+FastAPI app with `TestClient`, and prints the emitted SQL + the `meta`
+block for each question. It does not touch `backend/.env`, and helper
+output masks SQL passwords.
+
+Expected Phase C5 smoke result:
+
+- `/api/health` returns HTTP 200.
+- `/api/ask` returns HTTP 200 for the three Arabic questions.
+- `meta.compiler_backend = "python"`.
+- `meta.catalog_source = "sqlserver_tables"`.
+- `meta.skipped_for_sqlserver = None`.
+- `meta.log_id` is present from `bi_meta.query_log`.
+- The cache recheck returns `used_cache = True` from `bi_meta.plan_cache`.
 
 ## What Phase C3 ships in code
 
@@ -426,12 +489,11 @@ emitted SQL + the `meta` block for each question. It does not touch
   dimensions work end-to-end on SQL Server.
 - `backend/.env.example` — documents the local SQL Server URL.
 
-## What still has to happen for full SQL Server `/ask` parity (Phase C4)
+## Remaining SQL Server adoption work after Phase C5
 
-- Portable `plan_cache` upsert (`MERGE` on T-SQL, `INSERT ... ON CONFLICT`
-  on PG) and `query_log` insert.
-- Data load for `bi.fact_sales_line` (script or documented `bcp`).
-- Live integration smoke test against `MOHANADLENOVO\SQLEXPRESS`.
+- SQL Server-first README and final operator runbook.
+- Cleanup of temporary migration files and old branches after merge.
+- Keep PostgreSQL as a temporary fallback until final approval.
 - Migrate `services/query_service.py` off `utils/sql_safety.py`
   (still deferred from Phase B).
 - Optional: ship `db/sqlserver/` views to mirror the remaining

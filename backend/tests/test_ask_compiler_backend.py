@@ -8,7 +8,7 @@ Covers:
   (catalog + executor are mocked so the test stays DB-free).
 - The legacy db path on SQL Server still returns the Phase B 501 with
   a Phase C2 hint to set COMPILER_BACKEND=python.
-- Cache and query_log writes are skipped on SQL Server.
+- Cache and query_log writes are portable on SQL Server.
 """
 from __future__ import annotations
 
@@ -130,10 +130,26 @@ def _install_runner_mocks(monkeypatch, captured: _Captured, *, pg_logging_should
     async def fake_db_fetchrow(*a, **k):
         return None  # cache miss
 
+    async def fake_get_cached_plan(*a, **k):
+        return None
+
+    async def fake_touch_cached_plan(*a, **k):
+        return None
+
+    async def fake_upsert_cached_plan(*a, **k):
+        return None
+
+    async def fake_insert_query_log(*a, **k):
+        return None
+
     monkeypatch.setattr(ask_runner, "_get_catalog_with_source", fake_catalog)
     monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
     monkeypatch.setattr(ask_runner, "_db_fetchval", fake_db_fetchval)
     monkeypatch.setattr(ask_runner, "_db_fetchrow", fake_db_fetchrow)
+    monkeypatch.setattr(ask_runner, "get_cached_plan", fake_get_cached_plan)
+    monkeypatch.setattr(ask_runner, "touch_cached_plan", fake_touch_cached_plan)
+    monkeypatch.setattr(ask_runner, "upsert_cached_plan", fake_upsert_cached_plan)
+    monkeypatch.setattr(ask_runner, "insert_query_log", fake_insert_query_log)
 
 
 def test_ask_uses_python_compiler_on_postgres(monkeypatch):
@@ -159,7 +175,7 @@ def test_ask_uses_python_compiler_on_postgres(monkeypatch):
     assert isinstance(out["result"]["rows"], list)
 
 
-def test_ask_uses_python_compiler_on_sqlserver_and_skips_pg_only_io(monkeypatch):
+def test_ask_uses_python_compiler_on_sqlserver_and_uses_portable_sidechannels(monkeypatch):
     monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
     monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
 
@@ -172,10 +188,8 @@ def test_ask_uses_python_compiler_on_sqlserver_and_skips_pg_only_io(monkeypatch)
     # No more Phase B 501 when compiler_backend=python.
     assert out["meta"]["compiler_backend"] == "python"
 
-    # PG-only side channels skipped.
-    skipped = out["meta"]["skipped_for_sqlserver"] or []
-    assert "plan_cache" in skipped
-    assert "query_log" in skipped
+    # Cache/log side channels are now portable; compatibility field remains.
+    assert out["meta"]["skipped_for_sqlserver"] is None
     assert out["meta"]["log_id"] is None
 
     # Generated SQL uses the SQL Server dialect.
@@ -215,12 +229,24 @@ def test_ask_uses_sqlserver_catalog_loader(monkeypatch):
     async def fake_fetch_select(sql: str):
         return [{"city": "Sydney", "net_sales": 1.0}]
 
+    async def fake_get_cached_plan(*a, **k):
+        return None
+
+    async def fake_upsert_cached_plan(*a, **k):
+        return None
+
+    async def fake_insert_query_log(*a, **k):
+        return None
+
     async def boom(*a, **k):  # asyncpg helpers must not run on SQL Server
         called["pg_fetchval"] = True
         raise AssertionError("asyncpg used in sqlserver path")
 
     monkeypatch.setattr(catalog_loader, "load_sqlserver_catalog", fake_sql_loader)
     monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
+    monkeypatch.setattr(ask_runner, "get_cached_plan", fake_get_cached_plan)
+    monkeypatch.setattr(ask_runner, "upsert_cached_plan", fake_upsert_cached_plan)
+    monkeypatch.setattr(ask_runner, "insert_query_log", fake_insert_query_log)
     monkeypatch.setattr(ask_runner, "_db_fetchval", boom)
     monkeypatch.setattr(ask_runner, "_db_fetchrow", boom)
 

@@ -20,6 +20,7 @@ from backend.app.api.routes.logs import router as logs_router
 from backend.app.api.routes.eval import router as eval_router
 from backend.app.api.routes.transcribe import router as transcribe_router
 
+from backend.app.db.session import dispose_engine
 from backend.app.services.stt.transcriber import _get_model
 from pathlib import Path
 from dotenv import load_dotenv
@@ -45,6 +46,11 @@ def warmup_whisper():
         print("[STT] warmup ok")
     except Exception as e:
         print("[STT] warmup failed:", e)
+
+
+@app.on_event("shutdown")
+async def close_db_engine():
+    await dispose_engine()
 
 
 @app.middleware("http")

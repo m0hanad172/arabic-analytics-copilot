@@ -35,7 +35,9 @@ from backend.app.db.sqlserver_connect import (  # noqa: E402
     default_server_candidates,
     iter_connection_candidates,
     list_available_drivers,
+    mask_password,
     resolve_database_from_env,
+    resolve_sql_auth_from_env,
     resolve_server_from_env,
 )
 
@@ -100,6 +102,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     servers = [args.server] if args.server else default_server_candidates()
 
     _print(f"Database: {args.database}")
+    sql_user, sql_password = resolve_sql_auth_from_env()
+    _print(f"Authentication: {'SQL auth' if sql_user and sql_password else 'Windows trusted'}")
     _print(f"Servers to try ({len(servers)}):")
     for s in servers:
         _print(f"  - {s}")
@@ -110,18 +114,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         conn_str = build_connection_string(
             attempt.driver, attempt.server,
             database=args.database, trusted=True,
+            user=sql_user,
+            password=sql_password,
             trust_server_cert=True, encrypt=False,
         )
         _print(f"--> Trying driver={attempt.driver!r}  server={attempt.server!r}")
         err = _try_connect(conn_str, timeout=args.timeout)
         if err is None:
             _print("    SUCCESS")
-            _print(f"    Connection string: {conn_str}")
+            _print(f"    Connection string: {mask_password(conn_str)}")
             successes.append((attempt, conn_str))
             if args.first_only or True:  # first hit is good enough
                 break
         else:
-            _print(f"    failed: {err}")
+            _print(f"    failed: {mask_password(err)}")
 
     _print("")
     if not successes:
@@ -140,7 +146,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     _print("=== USE THIS ===")
     _print(f"DRIVER={attempt.driver!r}")
     _print(f"SERVER={attempt.server!r}")
-    _print(f"Connection string: {conn_str}")
+    _print(f"Connection string: {mask_password(conn_str)}")
     return 0
 
 
