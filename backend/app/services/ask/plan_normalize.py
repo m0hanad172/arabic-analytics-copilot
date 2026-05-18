@@ -12,6 +12,7 @@ from backend.app.services.ask.plan_core import (
 )
 
 Plan = Dict[str, Any]
+_AR_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u0640]")
 
 
 def _catalog_keys(catalog: dict, key: str) -> Set[str]:
@@ -69,6 +70,47 @@ def _dedupe_synonyms(plan: Plan, corrections: List[str]) -> Plan:
     plan["metrics"] = metrics
     plan["dimensions"] = dims
     return plan
+
+
+def _normalize_arabic_text(text: str) -> str:
+    s = _AR_DIACRITICS_RE.sub("", str(text or "").strip().lower())
+    return (
+        s.replace("أ", "ا")
+        .replace("إ", "ا")
+        .replace("آ", "ا")
+        .replace("ى", "ي")
+    )
+
+
+def _explicit_gross_profit_sort(question: str) -> bool:
+    q = _normalize_arabic_text(question)
+    if not ("ربح" in q and "اجمالي" in q):
+        return False
+    return any(
+        token in q
+        for token in (
+            "رتب",
+            "ترتيب",
+            "تنازلي",
+            "تنازليا",
+            "تصاعدي",
+            "تصاعديا",
+            "sort",
+            "order by",
+        )
+    )
+
+
+def _force_sort(plan: Plan, field: str, direction: str, corrections: List[str]) -> None:
+    current = plan.get("sort") or []
+    current_field = ""
+    current_dir = ""
+    if current and isinstance(current[0], dict):
+        current_field = str(current[0].get("field") or "")
+        current_dir = str(current[0].get("dir") or "")
+    if current_field != field or current_dir.lower() != direction:
+        plan["sort"] = [{"field": field, "dir": direction}]
+        corrections.append(f"sort_explicit:{field}:{direction}")
 
 
 def _autocorrect_plan(
@@ -333,6 +375,12 @@ def _apply_heuristics(
             plan["sort"] = [{"field": "gross_sales", "dir": "desc"}]
     if disc_hit and discount_metric:
         add_metric(discount_metric)
+
+    if _explicit_gross_profit_sort(question) and (
+        "gross_profit" in metrics_ok or "gross_profit" in (plan.get("metrics") or [])
+    ):
+        add_metric("gross_profit")
+        _force_sort(plan, "gross_profit", "desc", corrections)
 
     # Compare: stable ordering
     compare_hit = ("قارن" in q_raw) or ("compare" in q)

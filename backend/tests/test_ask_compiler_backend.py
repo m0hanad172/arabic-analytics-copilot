@@ -341,6 +341,113 @@ def test_ask_sqlserver_complex_filters_do_not_duplicate_boolean_glue(monkeypatch
     assert "JSONB" not in upper
 
 
+def _assert_complex_sqlserver_sql(sql: str, *, order_field: str):
+    upper = " ".join(sql.upper().split())
+    assert "AND AND" not in upper
+    assert "WHERE AND" not in upper
+    assert "OR OR" not in upper
+    assert "WHERE OR" not in upper
+    assert "TOP (8)" in sql
+    assert "f.city = 'Sydney'" in sql
+    assert "DATEPART(year, f.order_date_d) = 2015" in sql
+    assert "gross_profit" in sql
+    assert "discount_amount" in sql
+    assert "order_count" in sql
+    assert f"ORDER BY [{order_field}] DESC" in sql
+    assert "LIMIT" not in upper
+    assert "::BIGINT" not in upper
+    assert "::NUMERIC" not in upper
+    assert "ILIKE" not in upper
+    assert "JSONB" not in upper
+
+
+def _run_ask_with_mocked_llm(monkeypatch, question: str, llm_plan: dict) -> tuple[dict, str]:
+    monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+
+    cap = _Captured()
+
+    async def fake_catalog(schema="bi"):
+        return SQLSERVER_COMPLEX_CATALOG, "mock"
+
+    async def fake_fetch_select(sql: str):
+        cap.last_sql = sql
+        return [{"product_name": "Example", "order_quarter": 1, "order_year": 2015}]
+
+    async def fake_insert_query_log(*a, **k):
+        return 42
+
+    async def fake_call_gemini_with_budget(*a, **k):
+        return SimpleNamespace(
+            status="ok",
+            text=json.dumps(llm_plan, ensure_ascii=False),
+            ms=0,
+            attempts=1,
+            error=None,
+        )
+
+    monkeypatch.setattr(ask_runner, "_get_catalog_with_source", fake_catalog)
+    monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
+    monkeypatch.setattr(ask_runner, "insert_query_log", fake_insert_query_log)
+    monkeypatch.setattr(ask_runner, "LLM_ENABLED", True)
+    monkeypatch.setattr(ask_runner, "_backoff_active", lambda: False)
+    monkeypatch.setattr(ask_runner, "_get_gclient", lambda: object())
+    monkeypatch.setattr(ask_runner, "call_gemini_with_budget", fake_call_gemini_with_budget)
+
+    out = asyncio.run(
+        ask_runner.ask(
+            SimpleNamespace(question=question),
+            use_llm=True,
+            use_cache=False,
+        )
+    )
+    return out, cap.last_sql or ""
+
+
+def test_ask_llm_explicit_gross_profit_sort_overrides_net_sales_default(monkeypatch):
+    llm_plan = {
+        "metrics": ["net_sales", "gross_profit", "discount_amount", "order_count"],
+        "dimensions": ["product_name", "order_quarter", "order_year"],
+        "filters": [
+            {"field": "city", "op": "=", "value": "Sydney"},
+            {"field": "order_year", "op": "=", "value": 2015},
+        ],
+        "sort": [{"field": "net_sales", "dir": "desc"}],
+        "limit": 8,
+        "notes": "mocked_llm_wrong_sort",
+    }
+
+    out, sql = _run_ask_with_mocked_llm(monkeypatch, COMPLEX_ARABIC_QUESTION, llm_plan)
+
+    assert out["meta"]["used_llm"] is True
+    assert out["plan"]["sort"] == [{"field": "gross_profit", "dir": "desc"}]
+    _assert_complex_sqlserver_sql(sql, order_field="gross_profit")
+
+
+def test_ask_llm_explicit_net_sales_sort_is_preserved(monkeypatch):
+    question = (
+        "اعرض صافي المبيعات حسب اسم المنتج من مدينة سيدني خلال سنة 2015، "
+        "ورتب النتائج حسب صافي المبيعات تنازلياً واعرض أول 8 صفوف فقط"
+    )
+    llm_plan = {
+        "metrics": ["net_sales", "gross_profit", "discount_amount", "order_count"],
+        "dimensions": ["product_name", "order_quarter", "order_year"],
+        "filters": [
+            {"field": "city", "op": "=", "value": "Sydney"},
+            {"field": "order_year", "op": "=", "value": 2015},
+        ],
+        "sort": [{"field": "net_sales", "dir": "desc"}],
+        "limit": 8,
+        "notes": "mocked_llm_net_sort",
+    }
+
+    out, sql = _run_ask_with_mocked_llm(monkeypatch, question, llm_plan)
+
+    assert out["meta"]["used_llm"] is True
+    assert out["plan"]["sort"] == [{"field": "net_sales", "dir": "desc"}]
+    _assert_complex_sqlserver_sql(sql, order_field="net_sales")
+
+
 def test_ask_db_path_still_501_on_sqlserver_with_phase_c2_hint(monkeypatch):
     monkeypatch.setattr(settings, "compiler_backend", "db", raising=False)
     monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
