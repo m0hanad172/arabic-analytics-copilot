@@ -4,6 +4,26 @@ Phase C3 deliverable. This document describes how to stand up the
 ArabicAnalytics database on Microsoft SQL Server, and what the Phase C3
 code changes do.
 
+## Production readiness status
+
+As of 2026-05-19, SQL Server is the primary company runtime for Arabic
+Analytics Copilot. The verified runtime is:
+
+- `DATABASE_BACKEND=sqlserver`
+- `COMPILER_BACKEND=python`
+- SQL Server database `ArabicAnalytics`
+- semantic catalog loaded from SQL Server `bi_meta` tables
+- plan cache and query log persisted in SQL Server
+- Python compiler emitting guarded T-SQL
+
+The SQL Server connection probe, `/api/ask` smoke script, and acceptance
+question suite have passed. LLM planning may be enabled, but the runtime must
+continue to work when provider quota is exhausted by falling back to the
+rule-based planner.
+
+PostgreSQL remains available only as a legacy fallback until a separate
+SQL-Server-only removal phase is approved.
+
 ## Target environment
 
 | | |

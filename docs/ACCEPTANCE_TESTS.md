@@ -102,6 +102,11 @@ and question 8 with `use_llm=1` to match the product UI path when LLM is
 enabled. Question 8 still has rule-based/post-plan safeguards for limit, year,
 city, and sort correctness.
 
+LLM planning may be enabled in the product runtime, but acceptance must not
+depend on live quota availability. If the provider returns a quota status, the
+backend falls back to deterministic rule-based planning and should still emit
+valid SQL Server T-SQL.
+
 ## Acceptance Question List
 
 1. اعرض عدد الطلبات حسب المدينة واعرض أعلى 5
@@ -112,6 +117,8 @@ city, and sort correctness.
 6. اعرض المبيعات حسب الولاية
 7. اعرض عدد الطلبات حسب نوع العميل
 8. اعرض صافي المبيعات والربح الإجمالي وإجمالي الخصومات وعدد الطلبات حسب اسم المنتج والربع من مدينة سيدني خلال سنة 2015، ورتب النتائج حسب الربح الإجمالي تنازلياً واعرض أول 8 صفوف فقط
+
+9. اعرض صافي المبيعات والربح الإجمالي حسب فئة المنتج وطريقة الشحن خلال سنة 2016 ورتب حسب الربح الإجمالي تنازلياً واعرض أول 7 صفوف فقط
 
 ## Expected Checks For Every Question
 
@@ -156,6 +163,18 @@ For question 7, verify:
 - `f.customer_type AS [customer_type]`
 - `COUNT_BIG(*) AS [order_count]`
 - `GROUP BY f.customer_type`
+
+## Ship Mode Question SQL Checks
+
+For question 9, verify:
+
+- `TOP (7)`
+- `f.product_category AS [product_category]`
+- `f.ship_mode AS [ship_mode]`
+- `DATEPART(year, f.order_date_d) IN (2016)` or `DATEPART(year, f.order_date_d) = 2016`
+- `gross_profit` included
+- `ORDER BY [gross_profit] DESC`
+- no PostgreSQL syntax (`LIMIT`, `::bigint`, `::numeric`, `ILIKE`, `jsonb`)
 
 ## Manual Frontend Pass
 

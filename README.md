@@ -44,6 +44,11 @@ stores reusable plans in `plan_cache`.
 SQL Server is the production path. PostgreSQL code and Docker assets are kept
 only as fallback/legacy support until final removal approval.
 
+LLM planning can be enabled for richer natural-language interpretation, but
+the backend is expected to remain usable when provider quota is exhausted. In
+that case `/api/ask` records the LLM status and falls back to deterministic
+rule-based planning.
+
 ## SQL Server Setup
 
 Install these prerequisites on the Windows host:

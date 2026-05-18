@@ -5,6 +5,21 @@ Microsoft SQL Server. **Phase A** introduces the dialect foundation
 only. Phase B handles the driver and connection abstraction; Phase C
 handles `bi_meta.*` parity.
 
+## Current production status
+
+SQL Server is now the primary runtime for company use. The verified local
+runtime uses `DATABASE_BACKEND=sqlserver` and `COMPILER_BACKEND=python`,
+loads the semantic catalog from SQL Server `bi_meta` tables, writes
+`bi_meta.query_log`, reuses `bi_meta.plan_cache`, and emits guarded T-SQL
+through the Python semantic compiler.
+
+PostgreSQL remains in the codebase as a legacy fallback and test fixture only.
+Do not remove PostgreSQL or Docker assets until a separate removal plan is
+approved.
+
+Local runtime configuration belongs in ignored `backend/.env` or shell
+environment variables. Do not commit real SQL Server passwords.
+
 ## Current state (after Phase A)
 
 - **PostgreSQL is still the working backend.** No production behaviour

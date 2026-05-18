@@ -1,6 +1,6 @@
 # Final Cleanup Report
 
-Date: 2026-05-18
+Date: 2026-05-19
 
 Scope: audit only for production readiness. SQL Server is the company-ready
 runtime. PostgreSQL and Docker fallback assets are intentionally retained until
@@ -12,6 +12,28 @@ a separate final removal phase is approved.
 - Remote target: `origin/final`
 - Current baseline includes SQL Server portable cache/logging and planner fixes
 - `backend/.env`: ignored local file, not modified or staged by this audit
+
+## Final SQL Server Acceptance Status
+
+Passed in the local SQL Server production-readiness environment:
+
+- SQL Server connection probe with SQL Authentication
+- `scripts/smoke_sqlserver_ask.py`
+- `scripts/acceptance_sqlserver_questions.py`
+- focused backend compiler/cache/connection tests
+- `bi_meta.query_log` insert path
+- `bi_meta.plan_cache` lookup/reuse path
+
+Completed planner stabilization:
+
+- complex Arabic query emits `TOP (8)`, Sydney/year filters, and
+  `ORDER BY [gross_profit] DESC`
+- customer type grouping maps `نوع العميل` to `customer_type`
+- ship mode grouping maps `طريقة الشحن` and related Arabic phrases to
+  `ship_mode`
+
+PostgreSQL and Docker remain in the repository as legacy fallback assets and
+must stay under a separate, explicitly approved removal phase.
 
 ## Safe Deleted Already
 
