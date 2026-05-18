@@ -43,6 +43,30 @@ CATALOG_RAW = {
     ],
 }
 CATALOG = Catalog.from_bi_meta(CATALOG_RAW)
+SQLSERVER_CATALOG = Catalog.from_bi_meta({
+    "schema": "bi",
+    "base_view": "bi.vw_fact_sales_line_clean",
+    "metrics": [
+        {"key": "net_sales", "agg": "sum", "sql": "SUM(f.order_total)", "data_type": "numeric"},
+        {"key": "gross_profit", "agg": "sum", "sql": "SUM(f.gross_profit)", "data_type": "numeric"},
+        {"key": "discount_amount", "agg": "sum", "sql": "SUM(f.discount_amount)", "data_type": "numeric"},
+        {"key": "order_count", "agg": "count", "sql": "COUNT(*)", "data_type": "integer"},
+    ],
+    "dimensions": [
+        {"key": "city", "sql": "f.city", "data_type": "text"},
+        {"key": "product_name", "sql": "f.product_name", "data_type": "text"},
+        {"key": "order_year", "sql": "DATEPART(year, f.order_date_d)", "data_type": "integer"},
+        {"key": "order_quarter", "sql": "DATEPART(quarter, f.order_date_d)", "data_type": "integer"},
+    ],
+})
+
+
+def _assert_no_duplicate_boolean_glue(sql: str):
+    upper = re.sub(r"\s+", " ", sql.upper())
+    assert "AND AND" not in upper, sql
+    assert "WHERE AND" not in upper, sql
+    assert "OR OR" not in upper, sql
+    assert "WHERE OR" not in upper, sql
 
 
 # ===========================================================================
@@ -95,6 +119,7 @@ class TestCompilerPostgres:
             "limit": 50,
         }
         sql = compile_plan(plan, CATALOG, dialect=self.pg)
+        _assert_no_duplicate_boolean_glue(sql)
         assert "AND f.city = 'Sydney'" in sql
         assert "AND f.state IN ('NSW', 'VIC')" in sql
         assert "AND f.product_category ILIKE '%tech%'" in sql
@@ -188,6 +213,7 @@ class TestCompilerSqlServer:
             CATALOG, dialect=self.ms,
         )
         self._bans(sql)
+        _assert_no_duplicate_boolean_glue(sql)
         assert "AND f.city LIKE '%syd%'" in sql
 
     def test_pg_only_dimension_rejected_for_sqlserver(self):
@@ -243,6 +269,26 @@ class TestCompilerSqlServer:
         sql = compile_plan({"metrics": ["net_sales"]}, CATALOG, dialect=self.ms)
         assert sql.endswith(";")
         assert sql.count(";") == 1
+
+    def test_complex_filtered_sales_plan_has_single_boolean_glue(self):
+        plan = {
+            "dimensions": ["product_name", "order_quarter", "order_year"],
+            "metrics": ["net_sales", "gross_profit", "discount_amount", "order_count"],
+            "filters": [
+                {"field": "city", "op": "in", "value": ["Sydney"]},
+                {"field": "order_year", "op": "in", "value": [2015]},
+            ],
+            "sort": [{"field": "gross_profit", "dir": "desc"}],
+            "limit": 8,
+        }
+        sql = compile_plan(plan, SQLSERVER_CATALOG, dialect=self.ms)
+
+        self._bans(sql)
+        _assert_no_duplicate_boolean_glue(sql)
+        assert "TOP (8)" in sql
+        assert "f.city IN ('Sydney')" in sql
+        assert "DATEPART(year, f.order_date_d) IN (2015)" in sql
+        assert "ORDER BY [gross_profit] DESC" in sql
 
 
 # ===========================================================================

@@ -38,6 +38,29 @@ CATALOG = {
     ],
 }
 
+SQLSERVER_COMPLEX_CATALOG = {
+    "schema": "bi",
+    "base_view": "bi.vw_fact_sales_line_clean",
+    "metrics": [
+        {"key": "net_sales", "agg": "sum", "sql": "SUM(f.order_total)", "data_type": "numeric"},
+        {"key": "gross_profit", "agg": "sum", "sql": "SUM(f.gross_profit)", "data_type": "numeric"},
+        {"key": "discount_amount", "agg": "sum", "sql": "SUM(f.discount_amount)", "data_type": "numeric"},
+        {"key": "order_count", "agg": "count", "sql": "COUNT(*)", "data_type": "integer"},
+    ],
+    "dimensions": [
+        {"key": "city", "sql": "f.city", "data_type": "text"},
+        {"key": "product_name", "sql": "f.product_name", "data_type": "text"},
+        {"key": "order_year", "sql": "DATEPART(year, f.order_date_d)", "data_type": "integer"},
+        {"key": "order_quarter", "sql": "DATEPART(quarter, f.order_date_d)", "data_type": "integer"},
+    ],
+}
+
+COMPLEX_ARABIC_QUESTION = (
+    "اعرض صافي المبيعات والربح الإجمالي وإجمالي الخصومات وعدد الطلبات حسب اسم المنتج "
+    "والربع من مدينة سيدني خلال سنة 2015، ورتب النتائج حسب الربح الإجمالي تنازلياً "
+    "واعرض أول 8 صفوف فقط"
+)
+
 
 # ============================================================================
 # Default behaviour
@@ -257,6 +280,65 @@ def test_ask_uses_sqlserver_catalog_loader(monkeypatch):
     assert called["pg_fetchval"] is False
     assert out["meta"]["compiler_backend"] == "python"
     assert out["meta"]["catalog_source"] == "sqlserver_tables"
+
+
+def test_ask_sqlserver_complex_filters_do_not_duplicate_boolean_glue(monkeypatch):
+    monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+
+    expected_plan = {
+        "metrics": ["net_sales", "gross_profit", "discount_amount", "order_count"],
+        "dimensions": ["product_name", "order_quarter", "order_year"],
+        "filters": [
+            {"field": "city", "op": "in", "value": ["Sydney"]},
+            {"field": "order_year", "op": "in", "value": [2015]},
+        ],
+        "sort": [{"field": "gross_profit", "dir": "desc"}],
+        "limit": 8,
+        "notes": "regression",
+    }
+
+    async def fake_catalog(schema="bi"):
+        return SQLSERVER_COMPLEX_CATALOG, "mock"
+
+    async def fake_fetch_select(sql: str):
+        cap.last_sql = sql
+        return [{"product_name": "Example", "order_quarter": 1, "order_year": 2015}]
+
+    async def fake_insert_query_log(*a, **k):
+        return 42
+
+    cap = _Captured()
+    monkeypatch.setattr(ask_runner, "_get_catalog_with_source", fake_catalog)
+    monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
+    monkeypatch.setattr(ask_runner, "_rule_based_plan", lambda question, catalog: dict(expected_plan))
+    monkeypatch.setattr(ask_runner, "insert_query_log", fake_insert_query_log)
+
+    out = asyncio.run(
+        ask_runner.ask(
+            SimpleNamespace(question=COMPLEX_ARABIC_QUESTION),
+            use_llm=False,
+            use_cache=False,
+        )
+    )
+
+    sql = cap.last_sql or ""
+    upper = " ".join(sql.upper().split())
+    assert out["meta"]["compiler_backend"] == "python"
+    assert out["meta"]["skipped_for_sqlserver"] is None
+    assert out["meta"]["log_id"] == 42
+    assert "AND AND" not in upper
+    assert "WHERE AND" not in upper
+    assert "OR OR" not in upper
+    assert "WHERE OR" not in upper
+    assert "TOP (8)" in sql
+    assert "f.city IN ('Sydney')" in sql
+    assert "DATEPART(year, f.order_date_d) IN (2015)" in sql
+    assert "LIMIT" not in upper
+    assert "::BIGINT" not in upper
+    assert "::NUMERIC" not in upper
+    assert "ILIKE" not in upper
+    assert "JSONB" not in upper
 
 
 def test_ask_db_path_still_501_on_sqlserver_with_phase_c2_hint(monkeypatch):

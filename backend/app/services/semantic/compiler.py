@@ -13,7 +13,7 @@ Mirrors the PostgreSQL semantics of ``bi_meta.compile_query``:
 - limit clamped to [1, 5000], default 500.
 - ``SELECT <dim AS k, ...>, <metric AS k, ...>``
 - ``FROM bi.vw_fact_sales_line_clean f``
-- ``WHERE 1=1`` plus per-filter ``AND ...``.
+- ``WHERE 1=1`` plus per-filter predicates joined by ``AND``.
 - ``GROUP BY <dim_expr, ...>`` when there is at least one dimension.
 - ``ORDER BY "<sort_field>" <dir>`` for the first sort entry that
   resolves to a known metric or dimension.
@@ -67,6 +67,7 @@ _NUMERIC_AGG_INNER = re.compile(
     r"^(?P<fn>sum|avg|min|max)\s*\(\s*(?P<inner>.+?)(?:::numeric)?\s*\)\s*(?:::numeric)?$",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_LEADING_BOOLEAN = re.compile(r"^\s*(?:AND|OR)\b\s*", flags=re.IGNORECASE)
 
 
 def _strip_pg_casts(expr: str) -> str:
@@ -135,7 +136,9 @@ def compile_plan(
     # ---- WHERE ----
     where_parts: List[str] = ["1=1"]
     for f in plan.filters:
-        where_parts.append(_emit_filter(f, catalog, D))
+        clause = _normalize_filter_clause(_emit_filter(f, catalog, D))
+        if clause:
+            where_parts.append(clause)
 
     # ---- ORDER BY (first sort entry that resolves) ----
     order_clause = ""
@@ -213,11 +216,11 @@ def _emit_filter(f: Filter, catalog: Catalog, dialect: SqlDialect) -> str:
     dim_expr = _emit_dimension_expression(dim.sql_expression, dialect, f.field)
 
     if op in _COMPARISON_OPS:
-        return f"AND {dim_expr} {op} {_quote_literal(f.value)}"
+        return f"{dim_expr} {op} {_quote_literal(f.value)}"
 
     if op == "ilike":
         # Dialect chooses ILIKE (PG) or LIKE (SQL Server CI collation).
-        return "AND " + dialect.ilike(dim_expr, _quote_literal(f.value))
+        return dialect.ilike(dim_expr, _quote_literal(f.value))
 
     if op == "between":
         if not isinstance(f.value, (list, tuple)) or len(f.value) != 2:
@@ -225,7 +228,7 @@ def _emit_filter(f: Filter, catalog: Catalog, dialect: SqlDialect) -> str:
                 f"BETWEEN expects a 2-element list for {f.field}"
             )
         lo, hi = f.value
-        return f"AND {dim_expr} BETWEEN {_quote_literal(lo)} AND {_quote_literal(hi)}"
+        return f"{dim_expr} BETWEEN {_quote_literal(lo)} AND {_quote_literal(hi)}"
 
     # op == "in"
     if not isinstance(f.value, (list, tuple)):
@@ -234,9 +237,25 @@ def _emit_filter(f: Filter, catalog: Catalog, dialect: SqlDialect) -> str:
         )
     if not f.value:
         # Mirror PG behaviour: empty IN never matches.
-        return "AND 1=0"
+        return "1=0"
     in_list = ", ".join(_quote_literal(v) for v in f.value)
-    return f"AND {dim_expr} IN ({in_list})"
+    return f"{dim_expr} IN ({in_list})"
+
+
+def _normalize_filter_clause(clause: str) -> str:
+    """Return a bare predicate without leading boolean glue.
+
+    Older compiler fragments included a leading ``AND``. Keeping this
+    normalizer at the join boundary prevents accidental ``AND AND`` /
+    ``WHERE AND`` if a future filter helper regresses or a custom fragment
+    arrives already prefixed.
+    """
+    s = str(clause or "").strip()
+    while True:
+        cleaned = _LEADING_BOOLEAN.sub("", s, count=1).strip()
+        if cleaned == s:
+            return cleaned
+        s = cleaned
 
 
 def _ensure_single_trailing_semicolon(sql: str) -> str:
