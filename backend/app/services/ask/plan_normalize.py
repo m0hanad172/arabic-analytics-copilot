@@ -407,6 +407,21 @@ def _apply_heuristics(
     ):
         add_dim("customer_type")
 
+    ship_mode_hit = (
+        "\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0634\u062d\u0646" in q_norm_ar
+        or "\u0648\u0636\u0639 \u0627\u0644\u0634\u062d\u0646" in q_norm_ar
+        or "\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u062a\u0648\u0635\u064a\u0644" in q_norm_ar
+        or "ship mode" in q
+        or "shipping method" in q
+        or "delivery method" in q
+    )
+    grouping_ship_hit = (
+        "\u062d\u0633\u0628" in q_norm_ar
+        and "\u0627\u0644\u0634\u062d\u0646" in q_norm_ar
+    )
+    if ship_mode_hit or grouping_ship_hit:
+        add_dim("ship_mode")
+
     explicit_year = _infer_explicit_year_filter(question)
     if explicit_year is not None and "order_year" in dims_ok:
         add_dim("order_year")

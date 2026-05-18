@@ -50,7 +50,9 @@ SQLSERVER_COMPLEX_CATALOG = {
     "dimensions": [
         {"key": "city", "sql": "f.city", "data_type": "text"},
         {"key": "customer_type", "sql": "f.customer_type", "data_type": "text"},
+        {"key": "product_category", "sql": "f.product_category", "data_type": "text"},
         {"key": "product_name", "sql": "f.product_name", "data_type": "text"},
+        {"key": "ship_mode", "sql": "f.ship_mode", "data_type": "text"},
         {"key": "order_year", "sql": "DATEPART(year, f.order_date_d)", "data_type": "integer"},
         {"key": "order_quarter", "sql": "DATEPART(quarter, f.order_date_d)", "data_type": "integer"},
     ],
@@ -60,6 +62,12 @@ COMPLEX_ARABIC_QUESTION = (
     "اعرض صافي المبيعات والربح الإجمالي وإجمالي الخصومات وعدد الطلبات حسب اسم المنتج "
     "والربع من مدينة سيدني خلال سنة 2015، ورتب النتائج حسب الربح الإجمالي تنازلياً "
     "واعرض أول 8 صفوف فقط"
+)
+
+
+SHIP_MODE_ARABIC_QUESTION = (
+    "اعرض صافي المبيعات والربح الإجمالي حسب فئة المنتج وطريقة الشحن خلال سنة 2016 "
+    "ورتب حسب الربح الإجمالي تنازلياً واعرض أول 7 صفوف فقط"
 )
 
 
@@ -511,6 +519,44 @@ def test_ask_rule_based_complex_acceptance_question_sqlserver(monkeypatch):
     assert {"field": "order_year", "op": "=", "value": 2015} in out["plan"]["filters"]
     assert out["plan"]["sort"] == [{"field": "gross_profit", "dir": "desc"}]
     _assert_complex_sqlserver_sql(sql, order_field="gross_profit")
+
+
+def test_ask_rule_based_ship_mode_question_sqlserver(monkeypatch):
+    cap = _Captured()
+    _install_sqlserver_acceptance_mocks(monkeypatch, cap)
+
+    out = asyncio.run(
+        ask_runner.ask(
+            SimpleNamespace(question=SHIP_MODE_ARABIC_QUESTION),
+            use_llm=False,
+            use_cache=False,
+        )
+    )
+
+    sql = cap.last_sql or ""
+    upper = " ".join(sql.upper().split())
+    assert out["plan"]["limit"] == 7
+    assert {"net_sales", "gross_profit"}.issubset(set(out["plan"]["metrics"]))
+    assert {"product_category", "ship_mode", "order_year"}.issubset(set(out["plan"]["dimensions"]))
+    assert {"field": "order_year", "op": "=", "value": 2016} in out["plan"]["filters"]
+    assert out["plan"]["sort"] == [{"field": "gross_profit", "dir": "desc"}]
+    assert "TOP (7)" in sql
+    assert "f.product_category AS [product_category]" in sql
+    assert "f.ship_mode AS [ship_mode]" in sql
+    assert "DATEPART(year, f.order_date_d) = 2016" in sql
+    assert "[net_sales]" in sql
+    assert "[gross_profit]" in sql
+    group_by = sql.split("GROUP BY", 1)[1]
+    assert "f.product_category" in group_by
+    assert "f.ship_mode" in group_by
+    assert "ORDER BY [gross_profit] DESC" in sql
+    assert "AND AND" not in upper
+    assert "WHERE AND" not in upper
+    assert "LIMIT" not in upper
+    assert "::BIGINT" not in upper
+    assert "::NUMERIC" not in upper
+    assert "ILIKE" not in upper
+    assert "JSONB" not in upper
 
 
 def _assert_complex_sqlserver_sql(sql: str, *, order_field: str):

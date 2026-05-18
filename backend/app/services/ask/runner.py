@@ -73,7 +73,7 @@ DEFAULT_MAX_ROWS = int(os.getenv("DEFAULT_MAX_ROWS", "200"))
 
 DEDUPE_SYNONYMS = os.getenv("DEDUPE_SYNONYMS", "0") in ("1", "true", "True", "yes", "YES")
 PLAN_AUTOCORRECT = os.getenv("PLAN_AUTOCORRECT", "1") in ("1", "true", "True", "yes", "YES")
-PLAN_CACHE_VERSION = os.getenv("PLAN_CACHE_VERSION", "planner-v6")
+PLAN_CACHE_VERSION = os.getenv("PLAN_CACHE_VERSION", "planner-v7")
 
 # Reduce prompt size to improve LLM latency (non-breaking)
 LLM_MAX_KEYS_IN_PROMPT = int(os.getenv("LLM_MAX_KEYS_IN_PROMPT", "60"))

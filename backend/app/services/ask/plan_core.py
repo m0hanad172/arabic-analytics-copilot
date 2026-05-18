@@ -486,6 +486,18 @@ def _rule_based_plan(question: str, catalog: dict) -> Dict[str, Any]:
     if cont_hit and "product_container" in dims_ok:
         plan["dimensions"].append("product_container")
 
+    ship_mode_hit = any(
+        x in q
+        for x in [
+            "\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0634\u062d\u0646",
+            "\u0648\u0636\u0639 \u0627\u0644\u0634\u062d\u0646",
+            "\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u062a\u0648\u0635\u064a\u0644",
+        ]
+    ) or any(x in ql for x in ["ship mode", "shipping method", "delivery method"])
+    grouping_ship_hit = "\u062d\u0633\u0628" in q and "\u0627\u0644\u0634\u062d\u0646" in q
+    if (ship_mode_hit or grouping_ship_hit) and "ship_mode" in dims_ok:
+        plan["dimensions"].append("ship_mode")
+
     # city mapping
     city_map = {
         "سيدني": "Sydney",
