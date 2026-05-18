@@ -13,6 +13,30 @@ from backend.app.services.ask.plan_core import (
 
 Plan = Dict[str, Any]
 _AR_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u0640]")
+_ARABIC_DIGIT_TRANSLATION = str.maketrans(
+    {
+        "\u0660": "0",
+        "\u0661": "1",
+        "\u0662": "2",
+        "\u0663": "3",
+        "\u0664": "4",
+        "\u0665": "5",
+        "\u0666": "6",
+        "\u0667": "7",
+        "\u0668": "8",
+        "\u0669": "9",
+        "\u06f0": "0",
+        "\u06f1": "1",
+        "\u06f2": "2",
+        "\u06f3": "3",
+        "\u06f4": "4",
+        "\u06f5": "5",
+        "\u06f6": "6",
+        "\u06f7": "7",
+        "\u06f8": "8",
+        "\u06f9": "9",
+    }
+)
 
 
 def _catalog_keys(catalog: dict, key: str) -> Set[str]:
@@ -74,12 +98,33 @@ def _dedupe_synonyms(plan: Plan, corrections: List[str]) -> Plan:
 
 def _normalize_arabic_text(text: str) -> str:
     s = _AR_DIACRITICS_RE.sub("", str(text or "").strip().lower())
+    s = s.translate(_ARABIC_DIGIT_TRANSLATION)
     return (
         s.replace("أ", "ا")
         .replace("إ", "ا")
         .replace("آ", "ا")
         .replace("ى", "ي")
     )
+
+
+def _infer_explicit_year_filter(question: str) -> Optional[int]:
+    q = _normalize_arabic_text(question)
+    yearish = (
+        "\u0633\u0646\u0629" in q
+        or "\u0639\u0627\u0645" in q
+        or "\u062e\u0644\u0627\u0644" in q
+        or "year" in q
+    )
+    if not yearish:
+        return None
+    m = re.search(r"\b(19\d{2}|20\d{2})\b", q)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def _has_filter(filters: Any, field: str) -> bool:
+    return any(isinstance(f, dict) and f.get("field") == field for f in (filters or []))
 
 
 def _explicit_gross_profit_sort(question: str) -> bool:
@@ -353,6 +398,23 @@ def _apply_heuristics(
     if quarter_hit:
         add_dim("order_year")
         add_dim("order_quarter")
+
+    q_norm_ar = _normalize_arabic_text(question)
+
+    if (
+        "\u0646\u0648\u0639 \u0627\u0644\u0639\u0645\u064a\u0644" in q_norm_ar
+        or "customer type" in q
+    ):
+        add_dim("customer_type")
+
+    explicit_year = _infer_explicit_year_filter(question)
+    if explicit_year is not None and "order_year" in dims_ok:
+        add_dim("order_year")
+        filters = plan.get("filters") or []
+        if not _has_filter(filters, "order_year"):
+            filters.append({"field": "order_year", "op": "=", "value": explicit_year})
+            plan["filters"] = filters
+            corrections.append(f"add_filter:order_year={explicit_year}")
 
     # Metrics intent
     net_hit = any(x in q_raw for x in ["صافي", "صافية"]) or "net" in q

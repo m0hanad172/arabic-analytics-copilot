@@ -49,6 +49,7 @@ SQLSERVER_COMPLEX_CATALOG = {
     ],
     "dimensions": [
         {"key": "city", "sql": "f.city", "data_type": "text"},
+        {"key": "customer_type", "sql": "f.customer_type", "data_type": "text"},
         {"key": "product_name", "sql": "f.product_name", "data_type": "text"},
         {"key": "order_year", "sql": "DATEPART(year, f.order_date_d)", "data_type": "integer"},
         {"key": "order_quarter", "sql": "DATEPART(quarter, f.order_date_d)", "data_type": "integer"},
@@ -226,6 +227,108 @@ def test_ask_uses_python_compiler_on_sqlserver_and_uses_portable_sidechannels(mo
     assert "::NUMERIC" not in upper
 
 
+def _install_runner_cache_mocks(monkeypatch, *, version: str):
+    monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+    monkeypatch.setattr(ask_runner, "PLAN_CACHE_VERSION", version)
+
+    plan = {
+        "metrics": ["net_sales"],
+        "dimensions": ["city"],
+        "filters": [],
+        "sort": [{"field": "net_sales", "dir": "desc"}],
+        "limit": 5,
+        "notes": "cache_version_test",
+    }
+    state = {
+        "store": {},
+        "upserts": [],
+        "touches": [],
+        "logs": [],
+        "rule_calls": 0,
+        "sql": [],
+    }
+
+    async def fake_catalog(schema="bi"):
+        return CATALOG, "mock"
+
+    async def fake_fetch_select(sql: str):
+        state["sql"].append(sql)
+        return [{"city": "Sydney", "net_sales": 100.0}]
+
+    async def fake_get_cached_plan(question_norm, catalog_hash, **kwargs):
+        return state["store"].get((question_norm, catalog_hash))
+
+    async def fake_touch_cached_plan(cache_id, **kwargs):
+        state["touches"].append(cache_id)
+
+    async def fake_upsert_cached_plan(question_norm, question_raw, catalog_hash, plan_arg, model, **kwargs):
+        state["upserts"].append((question_norm, catalog_hash, model))
+        state["store"][(question_norm, catalog_hash)] = {
+            "id": len(state["upserts"]),
+            "plan": dict(plan_arg),
+            "model": model,
+        }
+
+    async def fake_insert_query_log(**kwargs):
+        state["logs"].append(kwargs)
+        return len(state["logs"])
+
+    def fake_rule_based_plan(question, catalog):
+        state["rule_calls"] += 1
+        return dict(plan)
+
+    monkeypatch.setattr(ask_runner, "_get_catalog_with_source", fake_catalog)
+    monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
+    monkeypatch.setattr(ask_runner, "get_cached_plan", fake_get_cached_plan)
+    monkeypatch.setattr(ask_runner, "touch_cached_plan", fake_touch_cached_plan)
+    monkeypatch.setattr(ask_runner, "upsert_cached_plan", fake_upsert_cached_plan)
+    monkeypatch.setattr(ask_runner, "insert_query_log", fake_insert_query_log)
+    monkeypatch.setattr(ask_runner, "_rule_based_plan", fake_rule_based_plan)
+    return state
+
+
+def test_plan_cache_same_version_hits_and_logs_every_run(monkeypatch):
+    state = _install_runner_cache_mocks(monkeypatch, version="planner-test-a")
+    body = SimpleNamespace(question="net sales by city")
+
+    first = asyncio.run(ask_runner.ask(body, use_cache=True))
+    second = asyncio.run(ask_runner.ask(body, use_cache=True))
+
+    assert first["meta"]["used_cache"] is False
+    assert second["meta"]["used_cache"] is True
+    assert first["meta"]["plan_cache_version"] == "planner-test-a"
+    assert second["meta"]["plan_cache_version"] == "planner-test-a"
+    assert state["rule_calls"] == 1
+    assert state["touches"] == [1]
+    assert len(state["logs"]) == 2
+    assert [entry["used_cache"] for entry in state["logs"]] == [False, True]
+    assert len(state["store"]) == 1
+    (_, effective_hash), = state["store"].keys()
+    assert effective_hash.endswith(":planner-test-a")
+
+
+def test_plan_cache_version_change_misses_old_cache_and_logs(monkeypatch):
+    state = _install_runner_cache_mocks(monkeypatch, version="planner-test-old")
+    body = SimpleNamespace(question="net sales by city")
+
+    first = asyncio.run(ask_runner.ask(body, use_cache=True))
+    monkeypatch.setattr(ask_runner, "PLAN_CACHE_VERSION", "planner-test-new")
+    second = asyncio.run(ask_runner.ask(body, use_cache=True))
+
+    assert first["meta"]["used_cache"] is False
+    assert second["meta"]["used_cache"] is False
+    assert first["meta"]["plan_cache_version"] == "planner-test-old"
+    assert second["meta"]["plan_cache_version"] == "planner-test-new"
+    assert state["rule_calls"] == 2
+    assert len(state["logs"]) == 2
+    assert [entry["used_cache"] for entry in state["logs"]] == [False, False]
+    assert len(state["store"]) == 2
+    hashes = {effective_hash for _, effective_hash in state["store"].keys()}
+    assert any(h.endswith(":planner-test-old") for h in hashes)
+    assert any(h.endswith(":planner-test-new") for h in hashes)
+
+
 def test_ask_uses_sqlserver_catalog_loader(monkeypatch):
     """Phase C3: on SQL Server the runner must call the new
     load_sqlserver_catalog helper instead of bi_meta.get_catalog()."""
@@ -341,6 +444,73 @@ def test_ask_sqlserver_complex_filters_do_not_duplicate_boolean_glue(monkeypatch
     assert "::NUMERIC" not in upper
     assert "ILIKE" not in upper
     assert "JSONB" not in upper
+
+
+def _install_sqlserver_acceptance_mocks(monkeypatch, captured: _Captured):
+    monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+    monkeypatch.setattr(settings, "database_backend", "sqlserver", raising=False)
+
+    async def fake_catalog(schema="bi"):
+        return SQLSERVER_COMPLEX_CATALOG, "mock"
+
+    async def fake_fetch_select(sql: str):
+        captured.last_sql = sql
+        return [{"ok": 1}]
+
+    async def fake_insert_query_log(*a, **k):
+        return 42
+
+    monkeypatch.setattr(ask_runner, "_get_catalog_with_source", fake_catalog)
+    monkeypatch.setattr(ask_runner, "fetch_select", fake_fetch_select)
+    monkeypatch.setattr(ask_runner, "insert_query_log", fake_insert_query_log)
+
+
+def test_ask_rule_based_customer_type_grouping_sqlserver(monkeypatch):
+    cap = _Captured()
+    _install_sqlserver_acceptance_mocks(monkeypatch, cap)
+
+    out = asyncio.run(
+        ask_runner.ask(
+            SimpleNamespace(question="اعرض عدد الطلبات حسب نوع العميل"),
+            use_llm=False,
+            use_cache=False,
+        )
+    )
+
+    sql = cap.last_sql or ""
+    upper = " ".join(sql.upper().split())
+    assert out["plan"]["metrics"] == ["order_count"]
+    assert "customer_type" in out["plan"]["dimensions"]
+    assert "f.customer_type AS [customer_type]" in sql
+    assert "COUNT_BIG(*) AS [order_count]" in sql
+    assert "GROUP BY f.customer_type" in sql
+    assert "AND AND" not in upper
+    assert "LIMIT" not in upper
+    assert "::BIGINT" not in upper
+    assert "::NUMERIC" not in upper
+    assert "ILIKE" not in upper
+    assert "JSONB" not in upper
+
+
+def test_ask_rule_based_complex_acceptance_question_sqlserver(monkeypatch):
+    cap = _Captured()
+    _install_sqlserver_acceptance_mocks(monkeypatch, cap)
+
+    out = asyncio.run(
+        ask_runner.ask(
+            SimpleNamespace(question=COMPLEX_ARABIC_QUESTION),
+            use_llm=False,
+            use_cache=False,
+        )
+    )
+
+    sql = cap.last_sql or ""
+    assert out["plan"]["limit"] == 8
+    assert {"net_sales", "gross_profit", "discount_amount", "order_count"}.issubset(set(out["plan"]["metrics"]))
+    assert {"product_name", "order_quarter", "order_year"}.issubset(set(out["plan"]["dimensions"]))
+    assert {"field": "order_year", "op": "=", "value": 2015} in out["plan"]["filters"]
+    assert out["plan"]["sort"] == [{"field": "gross_profit", "dir": "desc"}]
+    _assert_complex_sqlserver_sql(sql, order_field="gross_profit")
 
 
 def _assert_complex_sqlserver_sql(sql: str, *, order_field: str):

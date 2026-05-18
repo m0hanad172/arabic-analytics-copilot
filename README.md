@@ -33,6 +33,17 @@ Do not commit local `.env` files or real passwords. Keep `backend/.env` local.
 - `docs/DATABASE_MIGRATION.md`: backend database migration details
 - `docs/PHASE_C_PLAN.md`: Phase C compiler and SQL Server plan
 
+## Architecture
+
+The frontend posts Arabic questions to FastAPI `/api/ask`. The backend loads
+the SQL Server semantic catalog from `bi_meta`, creates or corrects an
+analytics plan, compiles it with the Python semantic compiler, validates the
+resulting T-SQL with guardrails, executes against `bi`, writes `query_log`, and
+stores reusable plans in `plan_cache`.
+
+SQL Server is the production path. PostgreSQL code and Docker assets are kept
+only as fallback/legacy support until final removal approval.
+
 ## SQL Server Setup
 
 Install these prerequisites on the Windows host:
@@ -113,6 +124,20 @@ The expected company smoke baseline is 5000 rows in:
 - `dbo.bi_ready_clean`
 - `bi.fact_sales_line`
 
+## Plan Cache
+
+The runtime namespaces cached plans with `PLAN_CACHE_VERSION` so planner or
+compiler fixes do not reuse old `bi_meta.plan_cache` rows. Query history in
+`bi_meta.query_log` is not removed or versioned.
+
+Manual SQL Server plan-cache clear, when needed:
+
+```sql
+DELETE FROM bi_meta.plan_cache;
+```
+
+Do not clear `bi_meta.query_log` during normal readiness checks.
+
 ## Run The Backend
 
 Create and install the Python environment:
@@ -181,6 +206,15 @@ The smoke should confirm:
 - `meta.skipped_for_sqlserver` is `None`
 - a `query_log` id is returned
 - `plan_cache` reuse reports `used_cache=True`
+
+Run the optional SQL Server acceptance question suite:
+
+```powershell
+$env:PYTHONIOENCODING="utf-8"
+python scripts/acceptance_sqlserver_questions.py
+```
+
+The full acceptance plan is in `docs/ACCEPTANCE_TESTS.md`.
 
 Focused backend tests:
 

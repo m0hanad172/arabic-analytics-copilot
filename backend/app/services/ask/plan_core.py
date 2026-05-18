@@ -215,6 +215,18 @@ def _infer_top_limit(question: str) -> Optional[int]:
     q_norm = q.translate(_ARABIC_DIGIT_MAP)
     ql = q_norm.lower()
 
+    # Explicit row/top phrasing, including "اول 8 صفوف" / "أول 8".
+    m_first = re.search(
+        r"(?:\btop\s*|[\u0623\u0627]\u0639\u0644\u0649\s*|[\u0623\u0627]\u0648\u0644\s*)(\d{1,4})",
+        ql,
+        flags=re.IGNORECASE,
+    )
+    if m_first:
+        try:
+            return int(m_first.group(1))
+        except Exception:
+            pass
+
     # explicit digits anywhere near top hints
     if any(h in q for h in _TOP_HINTS) or any(h in ql for h in ("top", "highest", "best")):
         m = re.search(r"\b(?:top\s*)?(\d{1,4})\b", ql)

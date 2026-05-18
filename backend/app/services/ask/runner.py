@@ -73,6 +73,7 @@ DEFAULT_MAX_ROWS = int(os.getenv("DEFAULT_MAX_ROWS", "200"))
 
 DEDUPE_SYNONYMS = os.getenv("DEDUPE_SYNONYMS", "0") in ("1", "true", "True", "yes", "YES")
 PLAN_AUTOCORRECT = os.getenv("PLAN_AUTOCORRECT", "1") in ("1", "true", "True", "yes", "YES")
+PLAN_CACHE_VERSION = os.getenv("PLAN_CACHE_VERSION", "planner-v6")
 
 # Reduce prompt size to improve LLM latency (non-breaking)
 LLM_MAX_KEYS_IN_PROMPT = int(os.getenv("LLM_MAX_KEYS_IN_PROMPT", "60"))
@@ -157,6 +158,17 @@ def _catalog_hash(catalog: dict) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _effective_cache_hash(catalog_hash: str) -> str:
+    """Namespace plan_cache rows by planner/compiler behavior version.
+
+    The physical plan_cache schema stays portable and unchanged. Bumping
+    PLAN_CACHE_VERSION makes old plans invisible without deleting query_log
+    history or requiring a DDL migration.
+    """
+    version = str(PLAN_CACHE_VERSION or "").strip()
+    return f"{catalog_hash}:{version}" if version else catalog_hash
 
 
 # robust trailing cleanup (handles ;; + whitespace + some bidi marks)
@@ -543,6 +555,7 @@ async def ask(
 
     catalog, catalog_source = await _get_catalog_with_source("bi")
     c_hash = _catalog_hash(catalog)
+    cache_hash = _effective_cache_hash(c_hash)
     q_norm = _normalize_question(str(question))
 
     plan: Optional[dict] = None
@@ -558,7 +571,7 @@ async def ask(
     if use_cache:
         cached = await get_cached_plan(
             q_norm,
-            c_hash,
+            cache_hash,
             pg_fetchrow_func=_db_fetchrow,
             ensure_json_func=_ensure_json_obj,
         )
@@ -721,7 +734,7 @@ async def ask(
         await upsert_cached_plan(
             q_norm,
             str(question),
-            c_hash,
+            cache_hash,
             plan,
             model_name,
             pg_fetchval_func=_db_fetchval,
@@ -857,6 +870,7 @@ async def ask(
             "plan_corrections": plan_corrections,
             "catalog_source": catalog_source,
             "catalog_hash": c_hash,
+            "plan_cache_version": PLAN_CACHE_VERSION,
             "explain_used": bool(explain),
             "explain_mode": ("rule" if explain else None),
             "compiler_backend": compiler_used,
