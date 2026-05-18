@@ -19,8 +19,9 @@ from backend.app.db.adapter import (
 
 # ---- Backend identification ------------------------------------------------
 
-def test_default_backend_is_postgres():
-    # No env override -> Settings default -> "postgres".
+def test_default_backend_is_postgres(monkeypatch):
+    # Isolate the documented default from a SQL Server-first local backend/.env.
+    monkeypatch.setattr(settings, "database_backend", "postgres", raising=False)
     assert active_backend() == "postgres"
     assert is_postgres() is True
     assert is_sqlserver() is False

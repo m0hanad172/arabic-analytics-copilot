@@ -188,6 +188,23 @@ Focused backend tests:
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_sqlserver_connect.py backend/tests/test_ask_cache_log.py backend/tests/test_ask_compiler_backend.py backend/tests/test_sqlserver_live_ask.py -q
 ```
 
+SQL Server runtime reads `backend/.env`, so a local company setup may keep:
+
+```env
+DATABASE_BACKEND=sqlserver
+COMPILER_BACKEND=python
+```
+
+Some tests intentionally verify the documented PostgreSQL/db fallback defaults.
+Those tests isolate settings internally, but you can also run a default-behavior
+pass from PowerShell with:
+
+```powershell
+$env:DATABASE_BACKEND="postgres"
+$env:COMPILER_BACKEND="db"
+.\.venv\Scripts\python.exe -m pytest backend/tests/test_db_adapter.py backend/tests/test_ask_compiler_backend.py -q
+```
+
 Optional live SQL Server pytest:
 
 ```powershell

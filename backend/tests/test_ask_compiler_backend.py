@@ -65,8 +65,9 @@ COMPLEX_ARABIC_QUESTION = (
 # ============================================================================
 # Default behaviour
 # ============================================================================
-def test_default_compiler_backend_is_db():
-    # Settings default; no env override required.
+def test_default_compiler_backend_is_db(monkeypatch):
+    # Isolate the documented default from a SQL Server-first local backend/.env.
+    monkeypatch.setattr(settings, "compiler_backend", "db", raising=False)
     assert ask_compile.active_compiler_backend() == "db"
 
 
@@ -88,6 +89,7 @@ class TestCompileDispatch:
 
     def test_python_path_does_not_touch_db(self, monkeypatch):
         monkeypatch.setattr(settings, "compiler_backend", "python", raising=False)
+        monkeypatch.setattr(settings, "database_backend", "postgres", raising=False)
         # Sentinel: if anything tried to touch asyncpg, this would raise.
         monkeypatch.setattr(
             ask_compile, "pg_fetchval",
