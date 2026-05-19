@@ -32,6 +32,67 @@ from backend.app.db.sqlserver_connect import (
 )
 
 
+_ACCEPTANCE_DATABASE_URL = ""
+_ACCEPTANCE_AUTH_MODE = "Windows trusted"
+
+
+def _build_sqlserver_database_url() -> tuple[str, str]:
+    server = os.environ.get("MSSQL_SERVER") or default_named_instance_server()
+    sql_user, sql_password = resolve_sql_auth_from_env()
+    odbc = build_connection_string(
+        resolve_driver_from_env("ODBC Driver 18 for SQL Server") or "ODBC Driver 18 for SQL Server",
+        server,
+        database=resolve_database_from_env(),
+        trusted=True,
+        user=sql_user,
+        password=sql_password,
+        trust_server_cert=True,
+        encrypt=False,
+    )
+    auth_mode = "SQL auth" if sql_user and sql_password else "Windows trusted"
+    return "mssql+aioodbc:///?odbc_connect=" + quote_plus(odbc), auth_mode
+
+
+def _apply_sqlserver_env() -> None:
+    os.environ["DATABASE_BACKEND"] = "sqlserver"
+    os.environ["COMPILER_BACKEND"] = "python"
+    os.environ["STT_WARMUP"] = "0"
+    os.environ["DATABASE_URL"] = _ACCEPTANCE_DATABASE_URL
+
+
+def _refresh_imported_app_config() -> None:
+    """Keep this script's env override ahead of backend/.env.
+
+    backend.app.main loads backend/.env during import. Re-applying the script
+    env and refreshing the already-created settings/session objects ensures
+    MSSQL_* SQL-auth settings win for this in-process TestClient run only.
+    """
+    _apply_sqlserver_env()
+
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from backend.app.core.config import settings
+    from backend.app.db import session as db_session
+
+    settings.database_backend = "sqlserver"
+    settings.compiler_backend = "python"
+    settings.database_url = _ACCEPTANCE_DATABASE_URL
+
+    db_session.engine = create_async_engine(
+        _ACCEPTANCE_DATABASE_URL,
+        pool_pre_ping=True,
+    )
+    db_session.SessionLocal = async_sessionmaker(
+        db_session.engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+    )
+
+
+_ACCEPTANCE_DATABASE_URL, _ACCEPTANCE_AUTH_MODE = _build_sqlserver_database_url()
+_apply_sqlserver_env()
+
+
 QUESTIONS = [
     "\u0627\u0639\u0631\u0636 \u0639\u062f\u062f \u0627\u0644\u0637\u0644\u0628\u0627\u062a \u062d\u0633\u0628 \u0627\u0644\u0645\u062f\u064a\u0646\u0629 \u0648\u0627\u0639\u0631\u0636 \u0623\u0639\u0644\u0649 5",
     "\u0627\u0639\u0631\u0636 \u0627\u0644\u0645\u0628\u064a\u0639\u0627\u062a \u062d\u0633\u0628 \u0627\u0644\u0633\u0646\u0629",
@@ -59,25 +120,8 @@ USE_LLM_BY_QUESTION = {
 
 
 def _configure_sqlserver_env() -> None:
-    os.environ["DATABASE_BACKEND"] = "sqlserver"
-    os.environ["COMPILER_BACKEND"] = "python"
-    os.environ["STT_WARMUP"] = "0"
-
-    server = os.environ.get("MSSQL_SERVER") or default_named_instance_server()
-    sql_user, sql_password = resolve_sql_auth_from_env()
-    odbc = build_connection_string(
-        resolve_driver_from_env("ODBC Driver 18 for SQL Server") or "ODBC Driver 18 for SQL Server",
-        server,
-        database=resolve_database_from_env(),
-        trusted=True,
-        user=sql_user,
-        password=sql_password,
-        trust_server_cert=True,
-        encrypt=False,
-    )
-    os.environ["DATABASE_URL"] = "mssql+aioodbc:///?odbc_connect=" + quote_plus(odbc)
-    auth_mode = "SQL auth" if sql_user and sql_password else "Windows trusted"
-    print(f"SQL Server acceptance mode: {auth_mode}")
+    _apply_sqlserver_env()
+    print(f"SQL Server acceptance mode: {_ACCEPTANCE_AUTH_MODE}")
 
 
 def _assert_common_sql(sql: str) -> None:
@@ -135,6 +179,7 @@ def main() -> int:
     from fastapi.testclient import TestClient
 
     from backend.app.main import app
+    _refresh_imported_app_config()
 
     with TestClient(app) as client:
         health = client.get("/api/health")
